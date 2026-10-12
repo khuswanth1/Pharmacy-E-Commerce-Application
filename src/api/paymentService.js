@@ -1,135 +1,63 @@
-import axios from "axios";
+import apiClient from "./apiClient";
 
-// ─── API base URL ────────────────────────────────────────────────────────────
-// All requests go through the API Gateway (port 8089) which routes:
-//   /api/payments/** → Payment Service (port 8085)
-// This matches Step 7 of the tutorial but uses the gateway instead of
-// hitting port 8085 directly so JWT + CORS headers are handled centrally.
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8089";
-
-// Helper: backend wraps all responses as { success, message, data }
-// Unwrap to get the actual payload.
+// All requests go through the API Gateway, which routes /api/payments/** to payment-service
+// and passes the signed-in user's id along. The backend wraps responses as { success, message, data }.
 const unwrap = (res) => res?.data?.data ?? res?.data;
+const messageOf = (error, fallback) => error?.response?.data?.message || fallback;
 
-// Helper: attach JWT token if logged in
-const authHeader = () => {
-  const token = localStorage.getItem("pharmacy_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Step 7 — Create Razorpay payment order
-//
-// POST /api/payments/create-order
-// Body    : { orderId: "101", amount: 49900 }   (amount in paise)
-// Returns : { razorpayOrderId, keyId, amount, currency }
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Create a Razorpay order, or record cash on delivery.
+ * orderId: the order id, or WLT_<userId>_<n> for a wallet top-up, LAB_<userId>_<n> for a lab test.
+ * amount (paise) is only used for top-ups and lab tests; orders are charged their total.
+ * Returns { razorpayOrderId, keyId, amount, currency }.
+ */
 export const createPaymentOrder = async ({ orderId, amount, paymentMethod }) => {
   try {
-    const response = await axios.post(
-      `${API_BASE}/api/payments/create-order`,
-      { orderId: String(orderId), amount: Number(amount), paymentMethod },
-      { headers: { "Content-Type": "application/json", ...authHeader() } }
-    );
-    // unwrap ApiResponse<PaymentOrderResponse>
-    return unwrap(response);
+    const res = await apiClient.post("/api/payments/create-order", {
+      orderId: String(orderId), amount: Number(amount) || 0, paymentMethod,
+    });
+    return unwrap(res);
   } catch (error) {
-    const msg = error.response?.data?.message
-              || error.response?.data?.error
-              || error.message
-              || "Failed to create payment order.";
-    console.error("[paymentService] createPaymentOrder error:", msg);
-    throw msg;
+    throw messageOf(error, "Couldn't start the payment. Please try again.");
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Step 9 — Verify Razorpay payment signature
-//
-// POST /api/payments/verify
-// Body    : { razorpayOrderId, razorpayPaymentId, razorpaySignature }
-// Returns : { status: "SUCCESS" | "FAILED" }
-// ─────────────────────────────────────────────────────────────────────────────
-export const verifyPayment = async ({ razorpayOrderId, razorpayPaymentId, razorpaySignature }) => {
+/**
+ * Confirm a Razorpay payment. The server then marks the order paid or credits the wallet.
+ * Body: { razorpayOrderId, razorpayPaymentId, razorpaySignature }. Safe to retry.
+ */
+export const verifyPayment = async (payment) => {
   try {
-    const response = await axios.post(
-      `${API_BASE}/api/payments/verify`,
-      { razorpayOrderId, razorpayPaymentId, razorpaySignature },
-      { headers: { "Content-Type": "application/json", ...authHeader() } }
-    );
-    // unwrap ApiResponse<{ status: "SUCCESS" | "FAILED" }>
-    return unwrap(response);
+    return unwrap(await apiClient.post("/api/payments/verify", payment));
   } catch (error) {
-    const msg = error.response?.data?.message
-              || error.message
-              || "Payment verification failed.";
-    console.error("[paymentService] verifyPayment error:", msg);
-    throw msg;
+    throw messageOf(error, "We couldn't confirm the payment. Please try again.");
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Get all payment records (admin / debug)
-// GET /api/payments
-// ─────────────────────────────────────────────────────────────────────────────
-export const getPayments = async () => {
+/** Pay an order (or lab test, with amount in paise) from the wallet balance. */
+export const payWithWallet = async ({ orderId, amount }) => {
   try {
-    const response = await axios.get(
-      `${API_BASE}/api/payments`,
-      { headers: authHeader() }
-    );
-    return unwrap(response) || [];
+    return unwrap(await apiClient.post("/api/payments/wallet/pay", { orderId: String(orderId), amount }));
   } catch (error) {
-    console.error("[paymentService] getPayments error:", error.message);
+    throw messageOf(error, "Couldn't pay from the wallet.");
+  }
+};
+
+/** Refund a cancelled order to the wallet. Returns { refunded } in rupees (0 if nothing was paid). */
+export const refundToWallet = async (orderId) => {
+  try {
+    return unwrap(await apiClient.post("/api/payments/refund-to-wallet", { orderId: String(orderId) }));
+  } catch (error) {
+    throw messageOf(error, "Couldn't refund to the wallet.");
+  }
+};
+
+/** The signed-in user's payments, newest first. */
+export const getMyPayments = async () => {
+  try {
+    return unwrap(await apiClient.get("/api/payments/mine")) || [];
+  } catch (error) {
+    console.error("[paymentService] getMyPayments error:", messageOf(error, error.message));
     return [];
-  }
-};
-
-// Get Payment by ID
-// GET /api/payments/{id}
-export const getPaymentById = async (id) => {
-  try {
-    const response = await axios.get(
-      `${API_BASE}/api/payments/${id}`,
-      { headers: authHeader() }
-    );
-    return unwrap(response);
-  } catch (error) {
-    console.error("[paymentService] getPaymentById error:", error.message);
-    throw error.response?.data?.message || "Failed to fetch payment by ID.";
-  }
-};
-
-// Get Payment by Order ID
-// GET /api/payments/order/{orderId}
-export const getPaymentByOrderId = async (orderId) => {
-  try {
-    const response = await axios.get(
-      `${API_BASE}/api/payments/order/${orderId}`,
-      { headers: authHeader() }
-    );
-    return unwrap(response);
-  } catch (error) {
-    console.error("[paymentService] getPaymentByOrderId error:", error.message);
-    throw error.response?.data?.message || "Failed to fetch payment by Order ID.";
-  }
-};
-
-// Update Payment Status
-// PUT /api/payments/{id}/status?status={status}
-export const updatePaymentStatus = async (id, status) => {
-  try {
-    const response = await axios.put(
-      `${API_BASE}/api/payments/${id}/status`,
-      null,
-      {
-        params: { status },
-        headers: authHeader()
-      }
-    );
-    return unwrap(response);
-  } catch (error) {
-    console.error("[paymentService] updatePaymentStatus error:", error.message);
-    throw error.response?.data?.message || "Failed to update payment status.";
   }
 };

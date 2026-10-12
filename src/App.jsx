@@ -29,6 +29,12 @@ import SearchResults from "./pages/SearchResults/SearchResults";
 import WishlistPage from "./pages/WishlistPage";
 import PaymentFailed from "./pages/Checkout/PaymentFailed";
 import LabTestBooking from "./pages/Medical/LabTestBooking";
+import { PartnerRegister, PartnerPending } from "./pages/Partner/PartnerAuth";
+import VendorDashboard from "./pages/Vendor/VendorDashboard";
+import DeliveryDashboard from "./pages/Delivery/DeliveryDashboard";
+import AdminDashboard from "./pages/Admin/AdminDashboard";
+import { RoleRoute } from "./components/Portal/PortalUI";
+import { ROLES } from "./utils/roles";
 
 
 // Protected Route
@@ -43,7 +49,11 @@ const ProtectedRoute = ({ children }) => {
 const LayoutController = ({ children }) => {
   const location = useLocation();
 
-  const isAuthRoute = location.pathname === "/" || location.pathname === "/login";
+  // Partner portals (vendor, delivery, admin) have their own layout, without the shop header.
+  const isPortalRoute = ["/partner", "/vendor", "/delivery", "/admin"].some(
+    (p) => location.pathname === p || location.pathname.startsWith(`${p}/`)
+  );
+  const isAuthRoute = location.pathname === "/" || location.pathname === "/login" || isPortalRoute;
 
   const isMinimalLayout =
     isAuthRoute ||
@@ -186,6 +196,35 @@ const App = () => {
  
           {/* Auth */}
 <Route path="/login/*" element={<Login />} />
+
+          {/* Partner portals */}
+          <Route path="/partner/login" element={<Navigate to="/login" replace />} />
+          <Route path="/partner/register" element={<PartnerRegister />} />
+          <Route path="/partner/pending" element={<PartnerPending />} />
+          <Route
+            path="/vendor/*"
+            element={
+              <RoleRoute role={ROLES.VENDOR} requireApproved>
+                <VendorDashboard />
+              </RoleRoute>
+            }
+          />
+          <Route
+            path="/delivery/*"
+            element={
+              <RoleRoute role={ROLES.DELIVERY} requireApproved>
+                <DeliveryDashboard />
+              </RoleRoute>
+            }
+          />
+          <Route
+            path="/admin/*"
+            element={
+              <RoleRoute role={ROLES.ADMIN}>
+                <AdminDashboard />
+              </RoleRoute>
+            }
+          />
  
           {/* Fallback */}
 <Route path="*" element={<Navigate to="/home" />} />

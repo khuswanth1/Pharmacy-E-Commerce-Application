@@ -1,5 +1,5 @@
 // src/components/Header/Header.jsx
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useContext } from "react";
 import { useNavigate } from "react-router-dom";
 import { Person, ShoppingCart, LocalPharmacy, LightMode, DarkMode } from "@mui/icons-material";
 
@@ -11,6 +11,7 @@ import CartBadge from "./CartBadge";
 import Login from "../../pages/Auth/Login";
 import PrescriptionToggle from "./PrescriptionToggle";
 import { useCart } from "../../context/CartContext";
+import { AuthContext } from "../../context/AuthContext";
 import MiniCart from "../Cart/MiniCart";
 
 const Header = () => {
@@ -19,8 +20,6 @@ const Header = () => {
   const [menuOpen, setMenuOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [user, setUser] = useState(null);
   const [miniCartOpen, setMiniCartOpen] = useState(false);
   const [isDark, setIsDark] = useState(() => localStorage.getItem("theme") === "dark");
 
@@ -36,31 +35,10 @@ const Header = () => {
 
   const { totalCount } = useCart();
 
-  /* -------------------------------
-      LOGIN SYNC
-  ------------------------------- */
-  const syncLoginState = useCallback(() => {
-    const storedUser = localStorage.getItem("user");
-    if (storedUser) {
-      try {
-        const parsed = JSON.parse(storedUser);
-        setUser(parsed);
-        setIsLoggedIn(true);
-      } catch (e) {
-        setUser(null);
-        setIsLoggedIn(false);
-      }
-    } else {
-      setUser(null);
-      setIsLoggedIn(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    syncLoginState();
-    window.addEventListener("storage", syncLoginState);
-    return () => window.removeEventListener("storage", syncLoginState);
-  }, [syncLoginState]);
+  // Signed-in user straight from AuthContext, so logging in or out (or editing the profile)
+  // shows in the header immediately instead of after a page reload.
+  const { user, logoutUser } = useContext(AuthContext);
+  const isLoggedIn = !!user;
 
   const goTo = (path) => {
     setProfileOpen(false);
@@ -152,12 +130,10 @@ const Header = () => {
                     </button>
                     <button
                       onClick={() => {
+                        logoutUser();
                         localStorage.removeItem("user");
-                        localStorage.removeItem("pharmacy_user");
-                        setIsLoggedIn(false);
-                        setUser(null);
                         setProfileOpen(false);
-                        window.location.href = "/login";
+                        navigate("/login", { replace: true });
                       }}
                       className="block px-3 py-2 w-full text-xs font-bold text-red-500 dark:text-red-400 text-left hover:bg-red-50 dark:hover:bg-red-950/20 rounded-xl transition mt-1"
                     >

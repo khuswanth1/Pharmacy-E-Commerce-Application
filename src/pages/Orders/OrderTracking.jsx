@@ -9,10 +9,58 @@ import {
   Shield, Mic, Close
 } from "@mui/icons-material";
 import { toast } from "react-toastify";
-import { createPaymentOrder, verifyPayment } from "../../api/paymentService";
+import { createPaymentOrder, verifyPayment, refundToWallet } from "../../api/paymentService";
+import { openRazorpayCheckout } from "../../utils/razorpay";
+import { syncUserFromServer } from "../../utils/wallet";
 import { updateOrderStatus, getOrderDetails, updateOrderDeliveryDetails } from "../../api/orderService";
 import { fetchAllProducts } from "../../api/productService";
-import { addWalletBalanceAPI } from "../../api/authService";
+import { getDeliveryCode } from "../../api/partnerService";
+
+/** Store, rider and the delivery code the customer gives the rider on arrival. */
+const DeliveryCodePanel = ({ order }) => {
+  const [code, setCode] = useState(null);
+  const active = ["CREATED", "PAID", "CONFIRMED", "PACKED", "SHIPPED"].includes(order?.status);
+
+  useEffect(() => {
+    if (!order?.id || !active) return;
+    getDeliveryCode(order.id).then((d) => setCode(d?.code || null)).catch(() => setCode(null));
+  }, [order?.id, active]);
+
+  if (!active || (!code && !order.vendorName && !order.deliveryPartnerName)) return null;
+
+  return (
+    <div className="bg-white/15 border border-white/25 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div className="text-xs space-y-0.5">
+        {order.vendorName && (
+          <p>
+            {order.status === "CONFIRMED" ? "Accepted by " : "Packed by "}<b>{order.vendorName}</b>
+            {order.status === "PACKED" && !order.deliveryPartnerName && " · finding a delivery partner"}
+          </p>
+        )}
+        {order.deliveryPartnerName && (
+          <p>
+            Delivered by <b>{order.deliveryPartnerName}</b>
+            {order.deliveryPartnerPhone && (
+              <> · <a href={`tel:${order.deliveryPartnerPhone}`} className="underline font-bold">{order.deliveryPartnerPhone}</a></>
+            )}
+          </p>
+        )}
+        {!order.vendorName && <p>Waiting for a pharmacy to accept your order.</p>}
+      </div>
+      {code && (
+        <div className="text-center bg-white text-[#FF6F3C] rounded-xl px-4 py-2">
+          <p className="text-[9px] font-black uppercase tracking-wider">Delivery code</p>
+          <p className="text-2xl font-black tracking-[0.3em] tabular-nums">{code}</p>
+          <p className="text-[9px] text-slate-500">Share only when you receive your order</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/** Statuses where the order is still moving, and how often to re-check it. */
+const LIVE_STATUSES = ["CREATED", "PAID", "CONFIRMED", "PACKED", "SHIPPED"];
+const LIVE_REFRESH_MS = 10000;
 
 const OrderTracking = () => {
   const { id } = useParams();
@@ -21,36 +69,12 @@ const OrderTracking = () => {
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [isPayingNow, setIsPayingNow] = useState(false);
   const [repayMethod, setRepayMethod] = useState("razorpay");
-  const [showUpiModal, setShowUpiModal] = useState(false);
-  const [simulatedRepayOrder, setSimulatedRepayOrder] = useState(null);
-
-  const handleRepayUpiSuccess = async (orderToUse) => {
-    const targetOrder = orderToUse || simulatedRepayOrder;
-    if (!targetOrder) return;
-    setIsPayingNow(true);
-    setShowUpiModal(false);
-    try {
-      await verifyPayment({
-        razorpayOrderId: targetOrder.razorpayOrderId,
-        razorpayPaymentId: "UPI_PAY_" + Date.now(),
-        razorpaySignature: "UPI_SIG_" + Date.now()
-      });
-      await updateOrderStatus(order.id, "PAID");
-      clearCart();
-      setIsPayingNow(false);
-      toast.success("Payment Successful!");
-      window.location.reload();
-    } catch (verifyErr) {
-      setIsPayingNow(false);
-      toast.error("Payment captured but verification failed. Contact support.");
-    }
-  };
-
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [refundMethod, setRefundMethod] = useState("wallet");
   const [isCancelling, setIsCancelling] = useState(false);
   const [order, setOrder] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [selectedTip, setSelectedTip] = useState(null);
   const [showCustomTipInput, setShowCustomTipInput] = useState(false);
@@ -102,6 +126,7 @@ const OrderTracking = () => {
     try {
       if (showLoading) setLoading(true);
       else setIsRefreshing(true);
+      setLoadError(false);
       const [data, productsList] = await Promise.all([
         getOrderDetails(id),
         fetchAllProducts().catch(() => [])
@@ -137,60 +162,47 @@ const OrderTracking = () => {
           receiverName: data.receiverName,
           phoneNumber: data.phoneNumber,
           address: data.address,
-          deliveryInstructions: data.deliveryInstructions
+          deliveryInstructions: data.deliveryInstructions,
+          vendorName: data.vendorName,
+          deliveryPartnerName: data.deliveryPartnerName,
+          deliveryPartnerPhone: data.deliveryPartnerPhone
         });
 
+        // Delivery details saved on the order win; otherwise keep the signed-in customer's.
         if (data.receiverName || data.phoneNumber || data.address) {
-          setUserProfile({
-            name: data.receiverName || "Khuswanth Rao Jadav",
-            phone: data.phoneNumber || "7671085912",
-            address: data.address || "19-9-37/23/c, Lakshmi puram, 5th cross, Near Mani towers, Revenue ward No 19, Tirupati near 19-9-37/23/c"
-          });
-          setEditName(data.receiverName || "Khuswanth Rao Jadav");
-          setEditPhone(data.phoneNumber || "7671085912");
-          setEditAddress(data.address || "19-9-37/23/c, Lakshmi puram, 5th cross, Near Mani towers, Revenue ward No 19, Tirupati near 19-9-37/23/c");
+          setUserProfile((prev) => ({
+            name: data.receiverName || prev.name,
+            phone: data.phoneNumber || prev.phone,
+            address: data.address || prev.address
+          }));
+          if (data.receiverName) setEditName(data.receiverName);
+          if (data.phoneNumber) setEditPhone(data.phoneNumber);
+          if (data.address) setEditAddress(data.address);
         }
         if (data.deliveryInstructions) {
           setDirectionsText(data.deliveryInstructions);
           setTempDirectionsText(data.deliveryInstructions);
         }
 
-        // Clear cart for all successful/pending orders except failed/cancelled
+        // Clear cart for all successful/pending orders except failed/cancelled.
+        // Only on the first load: background polls must not hit the cart API every few seconds.
         const statusUpper = (data.status || "CREATED").toUpperCase();
-        if (statusUpper !== "FAILED" && statusUpper !== "CANCELLED") {
+        if (showLoading && statusUpper !== "FAILED" && statusUpper !== "CANCELLED") {
           clearCart();
         }
       } else {
         throw new Error("No data returned");
       }
     } catch (err) {
+      // A failed background poll keeps showing the live data we already have.
+      if (!showLoading) return;
       console.warn("[OrderTracking] Live fetch failed, reading local storage history:", err);
       const orders = JSON.parse(localStorage.getItem("pharmacy_orders")) || [];
       const found = orders.find((o) => String(o.id) === String(id));
       if (found) {
         setOrder(found);
       } else {
-        setOrder({
-          id: id || "ORD90214",
-          createdAt: new Date().toISOString(),
-          date: "09 Apr 2026, 8:57 PM",
-          arrivalTime: "09 Apr 2026, 9:12 PM",
-          amount: "₹194",
-          originalAmount: "₹299",
-          status: "Delivered",
-          deliveryTime: "14 mins",
-          items: [
-            {
-              id: 99,
-              name: "Heritage Alpenvie Belgian Chocolate Ice Cream Tub",
-              final_price: 194,
-              cost: 299,
-              quantity: 1,
-              manufacturer: "Heritage Alpenvie",
-              images: "/assets/products/ice-cream.png"
-            }
-          ]
-        });
+        setLoadError(true);
       }
     } finally {
       if (showLoading) setLoading(false);
@@ -202,6 +214,18 @@ const OrderTracking = () => {
     loadLiveOrder(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Follow the order live while it moves vendor → rider → doorstep, so the customer sees
+  // "accepted", "out for delivery" and "delivered" without refreshing the page.
+  const orderStatus = order?.status;
+  useEffect(() => {
+    if (!LIVE_STATUSES.includes(orderStatus)) return undefined;
+    const timer = setInterval(() => {
+      if (!document.hidden) loadLiveOrder(false);
+    }, LIVE_REFRESH_MS);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, orderStatus]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -244,132 +268,39 @@ const OrderTracking = () => {
     navigate("/cart");
   };
 
-  // ── Load Razorpay SDK once
-  const loadRazorpayScript = () =>
-    new Promise((resolve) => {
-      if (window.Razorpay) { resolve(true); return; }
-      const script = document.createElement("script");
-      script.src = "https://checkout.razorpay.com/v1/checkout.js";
-      script.async = true;
-      script.onload = () => resolve(true);
-      script.onerror = () => resolve(false);
-      document.body.appendChild(script);
-    });
-
-  // ── Pay Now handler — resume payment for a pending online order
+  // ── Pay Now: pay for an unpaid order through Razorpay (UPI first when chosen).
+  // The server charges the order total and marks the order paid after verifying.
   const handlePayNow = async () => {
     setIsPayingNow(true);
     try {
-      const orderAmount = parseFloat(String(order.amount).replace("₹", "")) || 0;
-      if (orderAmount < 1) {
-        toast.error("Cannot determine order amount.");
-        return;
-      }
-
-      if (repayMethod === "upi") {
-        try {
-          const pOrder = await createPaymentOrder({
-            orderId: String(order.id),
-            amount: Math.round(orderAmount * 100),
-            paymentMethod: "UPI"
-          });
-          setSimulatedRepayOrder(pOrder);
-          setShowUpiModal(true);
-          setIsPayingNow(false);
-        } catch (payErr) {
-          toast.error("Failed to initiate payment.");
-          setIsPayingNow(false);
-        }
-        return;
-      }
-
-      const sdkLoaded = await loadRazorpayScript();
-      if (!sdkLoaded) {
-        toast.error("Razorpay SDK failed to load. Check your connection.");
-        return;
-      }
-
+      const user = (() => {
+        try { return JSON.parse(localStorage.getItem("user") || localStorage.getItem("pharmacy_user") || "{}"); } catch { return {}; }
+      })();
       const pOrder = await createPaymentOrder({
         orderId: String(order.id),
-        amount: Math.round(orderAmount * 100),
-        paymentMethod: "RAZORPAY"
+        paymentMethod: repayMethod === "upi" ? "UPI" : "RAZORPAY"
       });
-
-      if (!pOrder || !pOrder.razorpayOrderId) {
-        throw new Error("Could not create payment order. Please try again.");
-      }
-
       setIsPayingNow(false);
-
-      const user = (() => {
-        try { return JSON.parse(localStorage.getItem("user") || localStorage.getItem("pharmacy_user") || "{}")} catch { return {}; }
-      })();
-
-      const rzp = new window.Razorpay({
-        key: pOrder.keyId || "rzp_test_T6dPUc4yPxTBNw",
-        amount: pOrder.amount,
-        currency: pOrder.currency || "INR",
-        name: "Pharmacy App",
-        description: `Order #${order.id}`,
-        order_id: pOrder.razorpayOrderId,
-        handler: async (response) => {
-          setIsPayingNow(true);
-          try {
-            await verifyPayment({
-              razorpayOrderId: response.razorpay_order_id,
-              razorpayPaymentId: response.razorpay_payment_id,
-              razorpaySignature: response.razorpay_signature
-            });
-            await updateOrderStatus(order.id, "PAID");
-            clearCart();
-            setIsPayingNow(false);
-            toast.success("Payment Successful!");
-            window.location.reload(); // Refresh order status
-          } catch (verifyErr) {
-            setIsPayingNow(false);
-            toast.error("Payment captured but verification failed. Contact support.");
-          }
-        },
-        prefill: {
-          name: user.name || "",
-          email: user.email || "",
-          contact: user.phone || ""
-        },
-        notes: { orderId: order.id },
-        theme: { color: "#2734e9ff" },
-        config: {
-          display: {
-            blocks: {
-              upi: {
-                name: "UPI / QR Code",
-                instruments: [
-                  {
-                    method: "upi"
-                  }
-                ]
-              }
-            },
-            sequence: ["block.upi", "block.cards", "block.netbanking", "block.wallet"],
-            preferences: {
-              show_default_blocks: true
-            }
-          }
-        },
-        modal: {
-          ondismiss: () => {
-            setIsPayingNow(false);
-            toast.info("Payment cancelled. You can pay later from here.");
-          }
-        }
+      const paid = await openRazorpayCheckout(pOrder, {
+        name: "Pharmacy",
+        description: `Order #${String(order.id).slice(-8).toUpperCase()}`,
+        prefill: user,
+        preferUpi: repayMethod === "upi"
       });
-      rzp.on("payment.failed", (response) => {
-        setIsPayingNow(false);
-        toast.error(`Payment failed: ${response.error?.description || "Unknown error"}`);
-      });
-      rzp.open();
+      setIsPayingNow(true);
+      await verifyPayment(paid);
+      clearCart();
+      toast.success("Payment successful!");
+      setIsPayingNow(false);
+      // Show the paid order in place; no page reload.
+      await loadLiveOrder(false);
     } catch (err) {
       setIsPayingNow(false);
-      toast.error(err?.message || "Failed to initiate payment. Try again.");
+      if (err?.dismissed) {
+        toast.info("Payment cancelled. You can pay later from here.");
+        return;
+      }
+      toast.error(typeof err === "string" ? err : (err?.message || "Couldn't complete the payment. Try again."));
     }
   };
 
@@ -380,19 +311,15 @@ const OrderTracking = () => {
       try {
         const parsed = JSON.parse(saved);
         return {
-          name: parsed.name || "Khuswanth Rao Jadav",
-          phone: parsed.phone || "7671085912",
-          address: parsed.address || "19-9-37/23/c, Lakshmi puram, 5th cross, Near Mani towers, Revenue ward No 19, Tirupati"
+          name: parsed.name || "",
+          phone: parsed.phone || "",
+          address: parsed.address || "No delivery address saved"
         };
       } catch (e) {
-        // Fallback
+        // Fall through to empty details
       }
     }
-    return {
-      name: "Khuswanth Rao Jadav",
-      phone: "7671085912",
-      address: "19-9-37/23/c, Lakshmi puram, 5th cross, Near Mani towers, Revenue ward No 19, Tirupati"
-    };
+    return { name: "", phone: "", address: "No delivery address saved" };
   });
 
   const [isEditingPhone, setIsEditingPhone] = useState(false);
@@ -430,31 +357,40 @@ const OrderTracking = () => {
     setIsCancelling(true);
     try {
       await updateOrderStatus(order.id, "CANCELLED");
-      const refundAmount = parseFloat(String(order.amount).replace("₹", "")) || 0;
+      // Only money that was actually paid is refunded; the server checks the payment records.
+      const user = JSON.parse(localStorage.getItem("user") || localStorage.getItem("pharmacy_user") || "{}");
       if (refundMethod === "wallet") {
-        const user = JSON.parse(localStorage.getItem("user") || localStorage.getItem("pharmacy_user") || "{}");
-        if (user && user.id) {
-          await addWalletBalanceAPI(user.id, refundAmount);
-          if (user.walletBalance !== undefined) {
-            user.walletBalance = (user.walletBalance || 0) + refundAmount;
-            localStorage.setItem("user", JSON.stringify(user));
-            localStorage.setItem("pharmacy_user", JSON.stringify(user));
-          }
-          toast.success(`Refunded ₹${refundAmount} instantly to your Pharmacy Wallet!`);
+        const { refunded } = await refundToWallet(order.id);
+        if (Number(refunded) > 0) {
+          await syncUserFromServer(user.id || user.userId);
+          toast.success(`Order cancelled. ₹${refunded} refunded to your Pharmacy Wallet.`);
         } else {
-          toast.warn(`Order cancelled. Refund of ₹${refundAmount} will be processed manually.`);
+          toast.success("Order cancelled. Nothing was charged, so there's nothing to refund.");
         }
       } else {
-        toast.success(`Refund of ₹${refundAmount} initiated back to your original source (2 hours).`);
+        toast.success("Order cancelled. If you paid online, our team will refund it to your original payment method.");
       }
       setShowCancelModal(false);
-      window.location.reload();
+      await loadLiveOrder(false);
     } catch (err) {
       toast.error(err?.message || "Failed to cancel order.");
     } finally {
       setIsCancelling(false);
     }
   };
+
+  if (!loading && !order && loadError) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-8 gap-3 text-center">
+        <p className="text-sm font-black text-slate-800">We couldn't load this order</p>
+        <p className="text-xs text-slate-500">Check your connection and try again. If you just paid, your payment is safe.</p>
+        <div className="flex gap-2">
+          <button onClick={() => loadLiveOrder()} className="text-xs font-bold bg-orangeBrand text-white rounded-xl px-4 py-2">Try again</button>
+          <button onClick={() => navigate("/profile/orders")} className="text-xs font-bold border border-slate-300 rounded-xl px-4 py-2">My orders</button>
+        </div>
+      </div>
+    );
+  }
 
   if (loading || !order) {
     return (
@@ -471,8 +407,8 @@ const OrderTracking = () => {
     if (s === "DELIVERED") return "Your order has been delivered";
     if (s === "CANCELLED" || s === "FAILED") return "Your order was cancelled";
     if (s === "SHIPPED") return "Rider is out for delivery";
-    if (s === "PACKED") return "Your order is being packed";
-    if (s === "CONFIRMED") return "Your order is confirmed";
+    if (s === "PACKED") return "Packed and ready for pickup";
+    if (s === "CONFIRMED") return "A pharmacy accepted your order";
     if (s === "PAID") return "Payment verified, preparing your order";
     return "Processing your order";
   };
@@ -533,6 +469,8 @@ const OrderTracking = () => {
                   </button>
                 </div>
               </div>
+
+              <DeliveryCodePanel order={order} />
 
               {/* LATE NIGHT / DAYTIME DELIVERY BANNER */}
               {(() => {
@@ -1030,7 +968,7 @@ const OrderTracking = () => {
               </button>
 
               {/* Pay Now Button (if pending payment) */}
-              {!["DELIVERED", "CANCELLED", "FAILED", "PAID", "CONFIRMED", "PACKED", "SHIPPED"].includes((order.status || "").toUpperCase()) && order.paymentMethod !== "cod" && (
+              {["CREATED", "FAILED"].includes((order.status || "").toUpperCase()) && order.paymentMethod !== "cod" && (
                 <div className="space-y-2 border border-slate-100 p-3 rounded-2xl bg-slate-50/50">
                   <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-center mb-1">Repayment Method</p>
                   <div className="grid grid-cols-2 gap-2">
@@ -1063,7 +1001,7 @@ const OrderTracking = () => {
                     className="w-full bg-[#FF6F3C] hover:bg-[#e65a2b] text-white font-black text-xs py-3.5 rounded-2xl shadow-md flex items-center justify-center gap-1.5 transition active:scale-95 duration-150 mt-1"
                   >
                     <Payment sx={{ fontSize: 16 }} />
-                    <span>{isPayingNow ? "Processing..." : repayMethod === "upi" ? `Simulate UPI Payment (${order.amount})` : `Pay ${order.amount} via Razorpay`}</span>
+                    <span>{isPayingNow ? "Processing..." : repayMethod === "upi" ? `Pay ${order.amount} with UPI` : `Pay ${order.amount} via Razorpay`}</span>
                   </button>
                 </div>
               )}
@@ -1228,7 +1166,7 @@ const OrderTracking = () => {
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="text-xs font-bold text-slate-800 block">Back to source</span>
-                    <span className="text-[10px] text-slate-500 mt-1 block">Refund to original payment method (2 hours)</span>
+                    <span className="text-[10px] text-slate-500 mt-1 block">Our team refunds online payments to the original method</span>
                   </div>
                   <input
                     type="radio"
@@ -1250,60 +1188,6 @@ const OrderTracking = () => {
             >
               {isCancelling ? "Processing..." : "Cancel with full refund"}
             </button>
-          </div>
-        </div>
-      )}
-      {/* UPI QR CODE REPAY MODAL */}
-      {showUpiModal && simulatedRepayOrder && (
-        <div className="fixed inset-0 bg-black/60 flex justify-center items-center z-[2300] px-3 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl p-6 shadow-2xl max-w-sm w-full text-center space-y-5 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex justify-between items-center pb-2 border-b border-gray-100">
-              <h3 className="text-xs font-black text-gray-800 uppercase tracking-wider">UPI / QR Code Order Payment</h3>
-              <button 
-                onClick={() => {
-                  setShowUpiModal(false);
-                  toast.warn("Payment dismissed.");
-                }} 
-                className="text-gray-400 hover:text-gray-600 font-extrabold text-sm"
-              >
-                ✕
-              </button>
-            </div>
-            
-            <div className="space-y-1">
-              <span className="text-[10px] text-gray-400 font-extrabold uppercase tracking-wider block">Total Amount Due</span>
-              <span className="text-2xl font-black text-gray-900 block">{order.amount}</span>
-            </div>
-
-            <div className="flex justify-center p-3 bg-slate-50 rounded-2xl border border-slate-100 shadow-inner">
-              <img 
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(`upi://pay?pa=7671085919@ybl&pn=Pharmacy%20App&am=${parseFloat(String(order.amount).replace("₹", "")) || 0}&cu=INR&tn=Order%20${order.id}`)}`} 
-                alt="Order UPI Payment QR Code" 
-                className="w-[180px] h-[180px] object-contain"
-              />
-            </div>
-
-            <div className="text-[10px] text-gray-400 font-bold leading-relaxed px-4">
-              Scan this QR code using GPay, PhonePe, Paytm or any UPI App to pay, then click "Simulate Success" below to verify.
-            </div>
-
-            <div className="space-y-2 pt-2">
-              <button
-                onClick={() => handleRepayUpiSuccess()}
-                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs py-3.5 rounded-xl shadow-md transition duration-200 active:scale-95 uppercase tracking-wider"
-              >
-                Simulate Payment Success
-              </button>
-              <button
-                onClick={() => {
-                  setShowUpiModal(false);
-                  toast.warn("Payment dismissed.");
-                }}
-                className="w-full border border-gray-200 hover:bg-slate-50 text-gray-500 font-extrabold text-xs py-3 rounded-xl transition duration-200 active:scale-95 uppercase tracking-wider"
-              >
-                Cancel
-              </button>
-            </div>
           </div>
         </div>
       )}

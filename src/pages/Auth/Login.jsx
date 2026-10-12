@@ -1,9 +1,32 @@
-import React, { useState, useContext, useEffect } from "react";
+import React, { useState, useContext, useEffect, useRef } from "react";
 import { AuthContext } from "../../context/AuthContext";
 import { toast } from "react-toastify";
 import { Explore } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import { loginAPI, registerAPI, getProfileAPI, updateProfileAPI, forgotPasswordAPI, resetPasswordAPI, googleLoginAPI } from "../../api/authService";
+import { homeFor, hasRole, ROLES } from "../../utils/roles";
+import { GOOGLE_CLIENT_ID } from "../../utils/google";
+
+// Role picker on the login card.
+const LOGIN_ROLES = [
+  { id: "customer", label: "Customer", role: null, hint: "Order medicines and book lab tests" },
+  { id: "vendor", label: "Vendor", role: ROLES.VENDOR, hint: "Manage your pharmacy's orders and stock", signup: "VENDOR" },
+  { id: "delivery", label: "Delivery", role: ROLES.DELIVERY, hint: "Pick up and deliver orders", signup: "DELIVERY" },
+  { id: "admin", label: "Admin", role: ROLES.ADMIN, hint: "Approve partners and manage the store" },
+];
+
+/** Which picker option an account belongs to. Admin wins, since an admin may also hold other roles. */
+const accountRoleId = (profile) => {
+  if (hasRole(profile, ROLES.ADMIN)) return "admin";
+  if (hasRole(profile, ROLES.VENDOR)) return "vendor";
+  if (hasRole(profile, ROLES.DELIVERY)) return "delivery";
+  return "customer";
+};
+
+const wrongRoleMessage = (actualRole) => {
+  const article = /^[aeiou]/i.test(actualRole.label) ? "an" : "a";
+  return `This is ${article} ${actualRole.label.toLowerCase()} account. Choose "${actualRole.label}" above to log in.`;
+};
 
 const Login = ({ onClose }) => {
   const { loginUser } = useContext(AuthContext);
@@ -14,6 +37,12 @@ const Login = ({ onClose }) => {
 
   // Active tab: "login" or "signup" or "forgot" or "signupDetails"
   const [activeTab, setActiveTab] = useState("login");
+
+  // Who is logging in: customer, vendor, delivery or admin (see LOGIN_ROLES)
+  const [loginRole, setLoginRole] = useState("customer");
+  const selectedRole = LOGIN_ROLES.find((r) => r.id === loginRole);
+  const loginRoleRef = useRef(loginRole);
+  loginRoleRef.current = loginRole;
   
   // Forgot password sub-step: 1 (enter email), 2 (enter new passwords)
   const [forgotStep, setForgotStep] = useState(1);
@@ -55,7 +84,7 @@ const Login = ({ onClose }) => {
             // Clean up query parameters from the URL
             window.history.replaceState({}, document.title, window.location.pathname);
             if (isPage) {
-              window.location.href = "/home/All";
+              navigate("/home/All", { replace: true });
             } else {
               onClose();
             }
@@ -72,7 +101,9 @@ const Login = ({ onClose }) => {
 
     const saved = localStorage.getItem("user") || localStorage.getItem("pharmacy_user");
     if (saved && isPage) {
-      navigate("/home");
+      let savedUser = null;
+      try { savedUser = JSON.parse(saved); } catch (e) { savedUser = null; }
+      navigate(savedUser ? homeFor(savedUser) : "/home");
     }
   }, [navigate, isPage, loginUser, onClose]);
 
@@ -108,13 +139,21 @@ const Login = ({ onClose }) => {
         
         if (profileResponse && profileResponse.success) {
           const profileData = profileResponse.data;
-          
+
+          // The account must match the role picked above the form.
+          const actualRole = LOGIN_ROLES.find((r) => r.id === accountRoleId(profileData));
+          if (actualRole.id !== loginRole) {
+            localStorage.removeItem("pharmacy_token");
+            return setError(wrongRoleMessage(actualRole));
+          }
+
           localStorage.setItem("user", JSON.stringify(profileData));
           loginUser(profileData, token);
           toast.success("Welcome back! Logged in successfully. 🔓");
-          
-          if (isPage) {
-            window.location.href = "/home/All";
+
+          // Vendors, delivery partners and admins go to their own portal.
+          if (isPage || homeFor(profileData) !== "/home/All") {
+            navigate(homeFor(profileData), { replace: true });
           } else {
             onClose();
           }
@@ -212,7 +251,7 @@ const Login = ({ onClose }) => {
     if (success) {
       toast.success(`Welcome, ${name.trim()}! Onboarding completed successfully! 🎉`);
       if (isPage) {
-        window.location.href = "/home/All";
+        navigate("/home/All", { replace: true });
       } else {
         onClose();
       }
@@ -225,7 +264,7 @@ const Login = ({ onClose }) => {
     if (success) {
       toast.info("Onboarding completed with minimal profile details.");
       if (isPage) {
-        window.location.href = "/home/All";
+        navigate("/home/All", { replace: true });
       } else {
         onClose();
       }
@@ -320,22 +359,31 @@ const Login = ({ onClose }) => {
   const handleCredentialResponse = async (response) => {
     setError("");
     const idToken = response.credential;
+    // Read the role from a ref: Google keeps the callback from the render that initialised it.
+    const role = LOGIN_ROLES.find((r) => r.id === loginRoleRef.current);
     try {
       toast.info("Verifying Google account... 🔑");
-      const res = await googleLoginAPI(idToken);
+      const res = await googleLoginAPI(idToken, undefined, undefined, role.signup);
       if (res && res.success) {
         const { token, userId } = res.data;
         localStorage.setItem("pharmacy_token", token);
-        
+
         const profileResponse = await getProfileAPI(userId);
         if (profileResponse && profileResponse.success) {
           const profileData = profileResponse.data;
+
+          const actualRole = LOGIN_ROLES.find((r) => r.id === accountRoleId(profileData));
+          if (actualRole.id !== role.id) {
+            localStorage.removeItem("pharmacy_token");
+            return setError(wrongRoleMessage(actualRole));
+          }
+
           localStorage.setItem("user", JSON.stringify(profileData));
           loginUser(profileData, token);
           toast.success(`Welcome, ${profileData.name || 'User'}! Logged in successfully via Google. 🔓`);
-          
-          if (isPage) {
-            window.location.href = "/home/All";
+
+          if (isPage || homeFor(profileData) !== "/home/All") {
+            navigate(homeFor(profileData), { replace: true });
           } else {
             onClose();
           }
@@ -374,7 +422,7 @@ const Login = ({ onClose }) => {
     const initializeGoogleSignIn = () => {
       if (window.google) {
         window.google.accounts.id.initialize({
-          client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID || "835483946590-q21nftt5j44depfdvklupfrrj2siv273.apps.googleusercontent.com",
+          client_id: GOOGLE_CLIENT_ID,
           callback: handleCredentialResponse,
         });
 
@@ -445,6 +493,36 @@ const Login = ({ onClose }) => {
 
         </div>
 
+        {/* ROLE PICKER: who is logging in */}
+        {(activeTab === "login" || activeTab === "signup") && (
+          <div className="mb-4">
+            <div className="grid grid-cols-4 gap-1.5" role="radiogroup" aria-label="Log in as">
+              {LOGIN_ROLES.map((r) => (
+                <button
+                  key={r.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={loginRole === r.id}
+                  onClick={() => {
+                    setLoginRole(r.id);
+                    setError("");
+                    // Only customers sign up on this card; admins cannot sign up at all.
+                    if (r.id !== "customer") setActiveTab("login");
+                  }}
+                  className={`py-2 text-[11px] font-black rounded-xl border transition ${
+                    loginRole === r.id
+                      ? "bg-orange-50 border-orangeBrand text-orangeBrand"
+                      : "bg-white border-slate-200 text-gray-500 hover:text-gray-800 hover:border-slate-300"
+                  }`}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-gray-400 text-center mt-2">{selectedRole.hint}</p>
+          </div>
+        )}
+
         {/* TAB HEADER SELECTORS */}
         {activeTab !== "forgot" && activeTab !== "signupDetails" ? (
           <div className="flex bg-slate-100 p-1 rounded-2xl mb-6">
@@ -462,20 +540,27 @@ const Login = ({ onClose }) => {
             >
               Login
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("signup");
-                setError("");
-              }}
-              className={`flex-1 text-center py-2 text-xs font-black rounded-xl transition ${
-                activeTab === "signup"
-                  ? "bg-white text-orangeBrand shadow"
-                  : "text-gray-500 hover:text-gray-800"
-              }`}
-            >
-              Sign Up
-            </button>
+            {loginRole !== "admin" && (
+              <button
+                type="button"
+                onClick={() => {
+                  // Vendors and delivery partners apply on the partner sign-up form.
+                  if (selectedRole.signup) {
+                    navigate(`/partner/register?type=${selectedRole.signup}`);
+                    return;
+                  }
+                  setActiveTab("signup");
+                  setError("");
+                }}
+                className={`flex-1 text-center py-2 text-xs font-black rounded-xl transition ${
+                  activeTab === "signup"
+                    ? "bg-white text-orangeBrand shadow"
+                    : "text-gray-500 hover:text-gray-800"
+                }`}
+              >
+                {selectedRole.signup ? "Apply" : "Sign Up"}
+              </button>
+            )}
           </div>
         ) : activeTab === "forgot" ? (
           <div className="mb-6 border-b border-gray-50 pb-3">
@@ -558,16 +643,25 @@ const Login = ({ onClose }) => {
                 Log In
               </button>
 
-              <div className="relative my-4 flex items-center justify-center">
-                <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-slate-200"></div>
+              {/* Google sign-in for customers, vendors and delivery partners. Hidden (not removed) for admins so the button stays rendered. */}
+              <div className={loginRole === "admin" ? "hidden" : ""}>
+                <div className="relative my-4 flex items-center justify-center">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-slate-200"></div>
+                  </div>
+                  <span className="relative px-3 bg-white text-[10px] text-gray-400 font-extrabold uppercase">or continue with</span>
                 </div>
-                <span className="relative px-3 bg-white text-[10px] text-gray-400 font-extrabold uppercase">or continue with</span>
+
+                <div className="w-full flex justify-center mt-2">
+                  <div id="googleButtonLogin"></div>
+                </div>
               </div>
 
-              <div className="w-full flex justify-center mt-2">
-                <div id="googleButtonLogin"></div>
-              </div>
+              {loginRole === "admin" && (
+                <p className="text-center text-[11px] text-gray-500 pt-1">
+                  Admin accounts are set up by the system and can't be created here.
+                </p>
+              )}
             </form>
           )}
 

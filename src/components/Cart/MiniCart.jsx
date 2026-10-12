@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Close,
@@ -7,6 +7,7 @@ import {
   WarningAmber,
   Receipt,
   Percent,
+  LocalOffer,
   LocalMall,
   Paid,
   Refresh,
@@ -15,6 +16,13 @@ import { useCart } from "../../context/CartContext";
 import CartItem from "./CartItem";
 import { getOrderDetails } from "../../api/orderService";
 
+/** Full fees charged when an order misses the free delivery / free handling thresholds. */
+const FULL_DELIVERY_FEE = 30;
+const FULL_HANDLING_FEE = 70;
+
+/** Statuses that mean the last order went through, so a leftover cart can be dropped. */
+const SETTLED_STATUSES = ["PAID", "CONFIRMED", "PACKED", "SHIPPED", "DELIVERED", "COMPLETED"];
+
 const MiniCart = ({ isOpen, onClose }) => {
   const {
     cart,
@@ -22,6 +30,11 @@ const MiniCart = ({ isOpen, onClose }) => {
     syncBackendCart,
     subtotal,
     retailTotal,
+    retailDiscount,
+    couponDiscount,
+    gst,
+    deliveryCharges,
+    handlingFee,
     grandTotal,
     totalCount,
     requiresPrescription,
@@ -29,27 +42,42 @@ const MiniCart = ({ isOpen, onClose }) => {
   } = useCart();
   const navigate = useNavigate();
 
+  // Held in refs so the status check below depends on `isOpen` alone. `clearCart` gets a
+  // new identity on every CartProvider render, so having it as a dep meant clearing the
+  // cart re-triggered the effect, which cleared it again — an endless loop of
+  // /api/orders/detail requests for as long as the drawer stayed open.
+  const clearCartRef = useRef(clearCart);
+  const cartCountRef = useRef(cart.length);
+  const settledOrderRef = useRef(null);
+  clearCartRef.current = clearCart;
+  cartCountRef.current = cart.length;
+
   useEffect(() => {
-    if (isOpen) {
-      const checkOrderStatus = async () => {
-        try {
-          const orders = JSON.parse(localStorage.getItem("pharmacy_orders")) || [];
-          if (orders.length > 0) {
-            const lastOrder = orders[0];
-            if (lastOrder && lastOrder.id) {
-              const liveOrder = await getOrderDetails(lastOrder.id);
-              if (liveOrder && (liveOrder.status === "PAID" || liveOrder.status === "CONFIRMED" || liveOrder.status === "DELIVERED")) {
-                clearCart();
-              }
-            }
-          }
-        } catch (err) {
-          console.warn("[MiniCart] Could not check order status:", err);
-        }
-      };
-      checkOrderStatus();
+    if (!isOpen || cartCountRef.current === 0) return undefined;
+
+    let lastOrderId = null;
+    try {
+      const orders = JSON.parse(localStorage.getItem("pharmacy_orders")) || [];
+      lastOrderId = orders[0]?.id ?? null;
+    } catch (err) {
+      console.warn("[MiniCart] Could not read the local order history:", err);
     }
-  }, [isOpen, clearCart]);
+    // Already settled this order — there is nothing left to clear.
+    if (!lastOrderId || settledOrderRef.current === lastOrderId) return undefined;
+
+    let cancelled = false;
+    getOrderDetails(lastOrderId)
+      .then((liveOrder) => {
+        if (cancelled) return;
+        if (SETTLED_STATUSES.includes(String(liveOrder?.status || "").toUpperCase())) {
+          settledOrderRef.current = lastOrderId;
+          clearCartRef.current();
+        }
+      })
+      .catch((err) => console.warn("[MiniCart] Could not check order status:", err));
+
+    return () => { cancelled = true; };
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -63,11 +91,10 @@ const MiniCart = ({ isOpen, onClose }) => {
     navigate("/cart");
   };
 
-  // Dynamic calculations for savings
-  const mrpDiscount = Math.max(0, (retailTotal || 0) - (subtotal || 0));
-  const deliverySavings = subtotal >= 300 ? 90 : 5;
-  const handlingSavings = subtotal >= 200 ? 80 : 9;
-  const totalSavings = mrpDiscount + deliverySavings + handlingSavings;
+  // Savings mirror the billing in CartContext so the breakdown always reconciles with "To Pay".
+  const deliverySavings = FULL_DELIVERY_FEE - deliveryCharges;
+  const handlingSavings = FULL_HANDLING_FEE - handlingFee;
+  const totalSavings = retailDiscount + couponDiscount + deliverySavings + handlingSavings;
 
   return (
     <>
@@ -167,19 +194,43 @@ const MiniCart = ({ isOpen, onClose }) => {
                     </div>
                   </div>
 
+                  {couponDiscount > 0 && (
+                    <div className="flex justify-between items-center font-semibold text-emerald-600">
+                      <span>Coupon Discount</span>
+                      <span className="font-extrabold">-₹{couponDiscount}</span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-between items-center text-slate-500 font-semibold">
+                    <span>GST (18%)</span>
+                    <span className="font-extrabold text-slate-800">₹{gst}</span>
+                  </div>
+
                   <div className="flex justify-between items-center text-slate-500 font-semibold">
                     <span>Delivery Fee</span>
                     <div className="flex items-center gap-2">
-                      <span className="text-slate-400 line-through">₹30</span>
-                      <span className="font-black text-emerald-600 uppercase tracking-wider text-[10px]">FREE</span>
+                      {deliveryCharges === 0 ? (
+                        <>
+                          <span className="text-slate-400 line-through">₹{FULL_DELIVERY_FEE}</span>
+                          <span className="font-black text-emerald-600 uppercase tracking-wider text-[10px]">FREE</span>
+                        </>
+                      ) : (
+                        <span className="font-extrabold text-slate-800">₹{deliveryCharges}</span>
+                      )}
                     </div>
                   </div>
 
                   <div className="flex justify-between items-center text-slate-500 font-semibold">
                     <span>Handling Fee</span>
                     <div className="flex items-center gap-2">
-                      <span className="text-slate-400 line-through">₹10</span>
-                      <span className="font-black text-emerald-600 uppercase tracking-wider text-[10px]">FREE</span>
+                      {handlingFee === 0 ? (
+                        <>
+                          <span className="text-slate-400 line-through">₹{FULL_HANDLING_FEE}</span>
+                          <span className="font-black text-emerald-600 uppercase tracking-wider text-[10px]">FREE</span>
+                        </>
+                      ) : (
+                        <span className="font-extrabold text-slate-800">₹{handlingFee}</span>
+                      )}
                     </div>
                   </div>
 
@@ -188,8 +239,8 @@ const MiniCart = ({ isOpen, onClose }) => {
                   <div className="flex justify-between items-center font-black text-slate-800 text-[13px]">
                     <span>To Pay</span>
                     <div className="flex items-center gap-2">
-                      {retailTotal + 40 > grandTotal && (
-                        <span className="text-slate-400 line-through text-xs font-normal">₹{retailTotal + 40}</span>
+                      {totalSavings > 0 && (
+                        <span className="text-slate-400 line-through text-xs font-normal">₹{grandTotal + totalSavings}</span>
                       )}
                       <span className="text-base font-black text-slate-900">₹{grandTotal}</span>
                     </div>
@@ -198,54 +249,71 @@ const MiniCart = ({ isOpen, onClose }) => {
               </div>
 
               {/* 2. SAVINGS BLOCK */}
-              <div className="bg-emerald-50/40 border border-emerald-100/60 p-4 rounded-2xl flex flex-col gap-3 shadow-sm text-left">
-                <div className="flex items-center justify-between">
-                  <span className="text-[12px] font-black text-slate-800 uppercase tracking-wide">Savings on this order</span>
-                  <div className="bg-emerald-600 text-white px-3 py-1 rounded-lg font-black text-[12px] shadow-sm">
-                    ₹{totalSavings}
+              {totalSavings > 0 && (
+                <div className="bg-emerald-50/40 border border-emerald-100/60 p-4 rounded-2xl flex flex-col gap-3 shadow-sm text-left">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[12px] font-black text-slate-800 uppercase tracking-wide">Savings on this order</span>
+                    <div className="bg-emerald-600 text-white px-3 py-1 rounded-lg font-black text-[12px] shadow-sm">
+                      ₹{totalSavings}
+                    </div>
                   </div>
-                </div>
 
-                <div className="bg-white border border-emerald-100/30 rounded-xl p-3.5 space-y-3.5 shadow-[0_2px_8px_rgba(0,0,0,0.01)]">
-                  {/* Discount on MRP */}
-                  {mrpDiscount > 0 && (
-                    <div className="flex justify-between items-center text-xs">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-6 h-6 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
-                          <Percent sx={{ fontSize: 12 }} />
+                  <div className="bg-white border border-emerald-100/30 rounded-xl p-3.5 space-y-3.5 shadow-[0_2px_8px_rgba(0,0,0,0.01)]">
+                    {/* Discount on MRP */}
+                    {retailDiscount > 0 && (
+                      <div className="flex justify-between items-center text-xs">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-6 h-6 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
+                            <Percent sx={{ fontSize: 12 }} />
+                          </div>
+                          <span className="font-bold text-slate-700">Discount on MRP</span>
                         </div>
-                        <span className="font-bold text-slate-700">Discount on MRP</span>
+                        <span className="font-black text-slate-800">₹{retailDiscount}</span>
                       </div>
-                      <span className="font-black text-slate-800">₹{mrpDiscount}</span>
-                    </div>
-                  )}
+                    )}
 
-                  {/* FREE Delivery Savings */}
-                  <div className="flex justify-between items-center text-xs">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-6 h-6 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
-                        <LocalMall sx={{ fontSize: 11 }} />
+                    {/* Coupon savings */}
+                    {couponDiscount > 0 && (
+                      <div className="flex justify-between items-center text-xs">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-6 h-6 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
+                            <LocalOffer sx={{ fontSize: 11 }} />
+                          </div>
+                          <span className="font-bold text-slate-700">Coupon savings</span>
+                        </div>
+                        <span className="font-black text-slate-800">₹{couponDiscount}</span>
                       </div>
-                      <span className="font-bold text-slate-700">FREE delivery savings</span>
-                    </div>
-                    <span className="font-black text-slate-800">₹{deliverySavings}</span>
-                  </div>
+                    )}
 
-                  {/* Savings on Handling fee */}
-                  <div className="flex justify-between items-center text-xs">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-6 h-6 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
-                        <Paid sx={{ fontSize: 12 }} />
+                    {/* FREE Delivery Savings */}
+                    {deliverySavings > 0 && (
+                      <div className="flex justify-between items-center text-xs">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-6 h-6 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
+                            <LocalMall sx={{ fontSize: 11 }} />
+                          </div>
+                          <span className="font-bold text-slate-700">FREE delivery savings</span>
+                        </div>
+                        <span className="font-black text-slate-800">₹{deliverySavings}</span>
                       </div>
-                      <span className="font-bold text-slate-700">Savings on Handling fee</span>
-                    </div>
-                    <span className="font-black text-slate-800">₹{handlingSavings}</span>
+                    )}
+
+                    {/* Savings on Handling fee */}
+                    {handlingSavings > 0 && (
+                      <div className="flex justify-between items-center text-xs">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-6 h-6 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
+                            <Paid sx={{ fontSize: 12 }} />
+                          </div>
+                          <span className="font-bold text-slate-700">Savings on Handling fee</span>
+                        </div>
+                        <span className="font-black text-slate-800">₹{handlingSavings}</span>
+                      </div>
+                    )}
                   </div>
-                
                 </div>
+              )}
 
-              </div>
-              
             </div>
           )}
         </div>

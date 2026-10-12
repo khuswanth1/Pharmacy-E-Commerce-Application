@@ -50,9 +50,10 @@ export const registerAPI = async (name, email, password, phone) => {
 };
 
 // Google Login API call
-export const googleLoginAPI = async (idToken, email, name) => {
+// role: "VENDOR" or "DELIVERY" to log in an existing partner account (never creates a customer).
+export const googleLoginAPI = async (idToken, email, name, role) => {
   try {
-    const payload = idToken || email || name ? (idToken ? { idToken } : { email, name }) : null;
+    const payload = idToken || email || name ? (idToken ? { idToken, ...(role ? { role } : {}) } : { email, name }) : null;
     const response = payload
       ? await apiClient.post('/api/auth/google', payload)
       : await apiClient.get('/api/auth/google');

@@ -1,5 +1,5 @@
 // src/pages/Profile/Profile.jsx
-import React, { useState, useContext, useEffect } from "react";
+import React, { useState, useContext, useEffect, useCallback } from "react";
 import { Person, LocationOn, LocalMall, Lock, ChevronRight, CheckCircle, Cancel, Redeem, CreditCard, ArrowBack, Headphones, Edit, Delete, Add, Send, Paid, WhatsApp, Share, Bolt, LocalOffer, Receipt, ContentCopy, ArrowDownward, Medication, LocalPharmacy, LocalHospital, ShoppingBag, Close, ScienceOutlined } from "@mui/icons-material";
 import { AuthContext } from "../../context/AuthContext";
 import { useCart } from "../../context/CartContext";
@@ -7,21 +7,22 @@ import { toast } from "react-toastify";
 import { useNavigate, useLocation } from "react-router-dom";
 import { loadAddresses, removeAddress, syncAddressesWithBackend, updateAddressLocal } from "../../utils/addressStorage";
 import AddAddressModal from "../../components/Header/AddAddressModal";
+import SupportChat from "../../components/Support/SupportChat";
 import { updateProfileAPI, getProfileAPI } from "../../api/authService";
 import { getUserOrders } from "../../api/orderService";
-import { createPaymentOrder, verifyPayment, getPayments } from "../../api/paymentService";
+import { createPaymentOrder, verifyPayment, getMyPayments } from "../../api/paymentService";
+import { openRazorpayCheckout } from "../../utils/razorpay";
 import { getUserLabBookings, fetchAllProducts } from "../../api/productService";
 
-const loadRazorpayScript = () =>
-  new Promise((resolve) => {
-    if (window.Razorpay) { resolve(true); return; }
-    const script = document.createElement("script");
-    script.src = "https://checkout.razorpay.com/v1/checkout.js";
-    script.async = true;
-    script.onload = () => resolve(true);
-    script.onerror = () => resolve(false);
-    document.body.appendChild(script);
-  });
+/** Real time from order placed to delivered, e.g. "38 mins" or "2 hrs 5 mins"; null when unknown. */
+const deliveryDuration = (createdAt, deliveredAt) => {
+  const mins = Math.round((new Date(deliveredAt) - new Date(createdAt)) / 60000);
+  if (!deliveredAt || !Number.isFinite(mins) || mins < 0) return null;
+  if (mins < 60) return `${Math.max(1, mins)} ${mins === 1 ? "min" : "mins"}`;
+  const hours = Math.floor(mins / 60);
+  const rest = mins % 60;
+  return `${hours} ${hours === 1 ? "hr" : "hrs"}${rest ? ` ${rest} mins` : ""}`;
+};
 
 const Profile = () => {
   const { loginUser, logoutUser } = useContext(AuthContext);
@@ -106,26 +107,31 @@ const Profile = () => {
     if (!userId) return;
     setLoadingTransactions(true);
     try {
-      const allPayments = await getPayments();
-      // Filter payments that belong to this user's wallet top-ups
-      const walletPayments = allPayments.filter(p => 
-        p.orderId && (
-          p.orderId.startsWith(`WLT_${userId}_`) || 
-          p.orderId.includes(`_${userId}_`)
-        )
-      );
-      // Sort newest first
-      walletPayments.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      // Wallet activity: top-ups and refunds add money, wallet payments take it out.
+      const payments = await getMyPayments();
+      // Only money that actually moved: unfinished or failed attempts are left out.
+      const walletPayments = payments.filter((p) => {
+        const id = p.orderId || "";
+        const status = String(p.paymentStatus || "").toUpperCase();
+        if (status === "REFUNDED") return true;
+        if (status !== "SUCCESS") return false;
+        return p.purpose === "WALLET_TOPUP" || id.startsWith("WLT_") || p.paymentMethod === "WALLET";
+      });
       const mapped = walletPayments.map((p, idx) => {
-        const amountVal = p.amount ? (Number(p.amount) / 100) : 0;
-        const isSuccess = String(p.paymentStatus || p.status || "").toUpperCase() === "SUCCESS";
-        const isDebit = p.orderId && p.orderId.startsWith("WLT_PAY_");
+        const amountVal = p.amount ? Number(p.amount) / 100 : 0;
+        const status = String(p.paymentStatus || "").toUpperCase();
+        const id = p.orderId || "";
+        const shortId = id.split("_").pop().slice(-8).toUpperCase();
+        const isTopUp = p.purpose === "WALLET_TOPUP" || (id.startsWith("WLT_") && !id.startsWith("WLT_PAY_"));
+        const isRefund = status === "REFUNDED";
+        const isDebit = !isTopUp && !isRefund;
+        const title = isRefund
+          ? `Refund for order #${shortId}`
+          : isTopUp ? "Wallet top-up" : id.startsWith("LAB_") ? "Paid for lab test" : `Paid for order #${shortId}`;
         return {
           id: p.id || idx,
           type: isDebit ? "debit" : "credit",
-          title: isDebit 
-            ? `Paid for Order #${p.orderId.split("_").pop()}` 
-            : (isSuccess ? "Wallet Top Up Success" : `Wallet Top Up ${p.paymentStatus || "PENDING"}`),
+          title,
           time: p.createdAt ? new Date(p.createdAt).toLocaleString("en-IN") : "Recent",
           amount: isDebit ? `-₹${amountVal}` : `+₹${amountVal}`,
           amountRaw: amountVal,
@@ -240,26 +246,42 @@ const Profile = () => {
 
   // High-Fidelity Orders Data mimicking the Zepto screenshot
   const [orders, setOrders] = useState([]);
+  // "Get Help" chat, opened from an order's detail view.
+  const [helpOpen, setHelpOpen] = useState(false);
+  const closeHelp = useCallback(() => setHelpOpen(false), []);
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [showAllOrders, setShowAllOrders] = useState(false);
   const [productMap, setProductMap] = useState({}); // name (lowercase) → first image URL
 
   useEffect(() => {
-    if (activeTab === "orders" && profile) {
-      const uId = profile.id || profile.userId;
-      if (uId) {
-        setLoadingOrders(true);
-        getUserOrders(uId)
-          .then((data) => {
-            setOrders(data || []);
-            setLoadingOrders(false);
-          })
-          .catch((err) => {
-            console.error("Error fetching orders:", err);
-            setLoadingOrders(false);
-          });
-      }
-    }
+    if (activeTab !== "orders" || !profile) return undefined;
+    const uId = profile.id || profile.userId;
+    if (!uId) return undefined;
+
+    setLoadingOrders(true);
+    getUserOrders(uId)
+      .then((data) => {
+        setOrders(data || []);
+        setLoadingOrders(false);
+      })
+      .catch((err) => {
+        console.error("Error fetching orders:", err);
+        setLoadingOrders(false);
+      });
+
+    // Keep statuses current (accepted, out for delivery, delivered) without a page reload.
+    // getUserOrders answers [] when a request fails, and orders never disappear, so an
+    // empty answer here is ignored rather than wiping the list.
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      getUserOrders(uId).then((data) => { if (data?.length) setOrders(data); }).catch(() => {});
+    };
+    const timer = setInterval(refresh, 10000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+    };
   }, [activeTab, profile]);
 
   // Load product catalog once to build name → image lookup
@@ -380,7 +402,7 @@ const Profile = () => {
       arrivalTime: formatOrderDate(new Date(new Date(o.createdAt).getTime() + 15 * 60 * 1000)), // 15 mins later
       amount: "₹" + (o.totalAmount || 0),
       status: normalizedStatus,
-      deliveryTime: isDelivered ? "14 mins" : null,
+      deliveryTime: isDelivered ? deliveryDuration(o.createdAt, o.deliveredAt) : null,
       items: (o.items || []).map((item, idx) => ({
         id: item.productId || item.id || idx,
         productId: item.productId || item.id,
@@ -562,37 +584,6 @@ const Profile = () => {
   const [showTopUpModal, setShowTopUpModal] = useState(false);
   const [topUpAmount, setTopUpAmount] = useState("500");
   const [topUpMethod, setTopUpMethod] = useState("razorpay");
-  const [showUpiModal, setShowUpiModal] = useState(false);
-  const [simulatedWalletOrder, setSimulatedWalletOrder] = useState(null);
-
-  const handleWalletUpiSuccess = async (orderToUse) => {
-    const targetOrder = orderToUse || simulatedWalletOrder;
-    if (!targetOrder) return;
-    setIsToppingUp(true);
-    setShowUpiModal(false);
-    try {
-      await verifyPayment({
-        razorpayOrderId: targetOrder.razorpayOrderId,
-        razorpayPaymentId: "WLT_PAY_" + Date.now(),
-        razorpaySignature: "WLT_SIG_" + Date.now()
-      });
-      const freshUser = await getProfileAPI(profile.id || profile.userId);
-      if (freshUser && freshUser.success) {
-        setProfile(freshUser.data);
-        localStorage.setItem("user", JSON.stringify(freshUser.data));
-        localStorage.setItem("pharmacy_user", JSON.stringify(freshUser.data));
-        window.dispatchEvent(new Event("storage"));
-      }
-      toast.success(`Successfully added ₹${targetOrder.amount / 100} to your wallet! 🎉`);
-      loadTransactions();
-    } catch (verifyErr) {
-      console.error(verifyErr);
-      toast.error("Signature verification failed.");
-    } finally {
-      setIsToppingUp(false);
-    }
-  };
-
   const handleWalletTopUp = () => {
     setTopUpAmount("500");
     setTopUpMethod("razorpay");
@@ -605,109 +596,45 @@ const Profile = () => {
       toast.error("Please enter a valid amount greater than 0.");
       return;
     }
+    if (amount > 50000) {
+      toast.error("You can add up to ₹50,000 at a time.");
+      return;
+    }
     setIsToppingUp(true);
     setShowTopUpModal(false);
     try {
-      if (topUpMethod === "upi") {
-        try {
-          const orderId = `WLT_${profile.id || profile.userId || "GUEST"}_${Date.now()}`;
-          const pOrder = await createPaymentOrder({
-            orderId: orderId,
-            amount: Math.round(amount * 100),
-            paymentMethod: "UPI"
-          });
-          setSimulatedWalletOrder(pOrder);
-          setShowUpiModal(true);
-          setIsToppingUp(false);
-        } catch (payErr) {
-          toast.error("Failed to create wallet payment order.");
-          setIsToppingUp(false);
-        }
-        return;
-      }
-
-      const scriptLoaded = await loadRazorpayScript();
-      if (!scriptLoaded) {
-        throw new Error("Razorpay SDK failed to load. Please check your internet connection.");
-      }
+      // Pay through Razorpay; the server credits the wallet after verifying the payment.
       const pOrder = await createPaymentOrder({
-        orderId: `WLT_${profile.id || profile.userId || "GUEST"}_${Date.now()}`,
-        amount: Math.round(amount * 100), // in paise
-        paymentMethod: "RAZORPAY"
+        orderId: `WLT_${profile.id || profile.userId}_${Date.now()}`,
+        amount: Math.round(amount * 100),
+        paymentMethod: topUpMethod === "upi" ? "UPI" : "RAZORPAY"
       });
-      if (!pOrder || !pOrder.razorpayOrderId) {
-        throw new Error("Failed to initialize Razorpay order.");
-      }
-      const options = {
-        key: pOrder.keyId || "rzp_test_T6dPUc4yPxTBNw",
-        amount: pOrder.amount,
-        currency: pOrder.currency || "INR",
+      setIsToppingUp(false);
+      const paid = await openRazorpayCheckout(pOrder, {
         name: "Pharmacy Wallet",
-        description: `Load ₹${amount} into Wallet`,
-        order_id: pOrder.razorpayOrderId,
-        handler: async (response) => {
-          setIsToppingUp(true);
-          try {
-            await verifyPayment({
-              razorpayOrderId: response.razorpay_order_id,
-              razorpayPaymentId: response.razorpay_payment_id,
-              razorpaySignature: response.razorpay_signature
-            });
-            const newBalance = (profile.walletBalance || 0) + amount;
-            const success = await updateProfileOnBackend({ walletBalance: newBalance });
-            if (success) {
-              toast.success(`Successfully added ₹${amount} to your wallet! 🎉`);
-              loadTransactions();
-            } else {
-              toast.error("Payment verified but failed to update wallet balance on server.");
-            }
-          } catch (verifyErr) {
-            console.error(verifyErr);
-            toast.error("Signature verification failed.");
-          } finally {
-            setIsToppingUp(false);
-          }
-        },
-        prefill: {
-          name: profile.name || "",
-          email: profile.email || "",
-          contact: profile.phone || ""
-        },
-        theme: {  color: "#2734e9ff" },
-        config: {
-          display: {
-            blocks: {
-              upi: {
-                name: "UPI / QR Code",
-                instruments: [
-                  {
-                    method: "upi"
-                  }
-                ]
-              }
-            },
-            sequence: ["block.upi", "block.cards", "block.netbanking", "block.wallet"],
-            preferences: {
-              show_default_blocks: true
-            }
-          }
-        },
-        modal: {
-          ondismiss: () => {
-            setIsToppingUp(false);
-            toast.warn("Payment dismissed.");
-          }
-        }
-      };
-      const rzp = new window.Razorpay(options);
-      rzp.on("payment.failed", (response) => {
-        setIsToppingUp(false);
-        toast.error(`Payment failed: ${response.error.description}`);
+        description: `Add ₹${amount} to your wallet`,
+        prefill: profile,
+        preferUpi: topUpMethod === "upi"
       });
-      rzp.open();
+      setIsToppingUp(true);
+      await verifyPayment(paid);
+      const fresh = await getProfileAPI(profile.id || profile.userId);
+      if (fresh?.success) {
+        setProfile(fresh.data);
+        localStorage.setItem("user", JSON.stringify(fresh.data));
+        localStorage.setItem("pharmacy_user", JSON.stringify(fresh.data));
+        window.dispatchEvent(new Event("storage"));
+      }
+      toast.success(`Added ₹${amount} to your wallet! 🎉`);
+      loadTransactions();
     } catch (err) {
-      console.error(err);
-      toast.error(typeof err === "string" ? err : "Failed to initiate top-up.");
+      if (err?.dismissed) {
+        toast.warn("Top-up cancelled.");
+      } else {
+        console.error(err);
+        toast.error(typeof err === "string" ? err : (err?.message || "Couldn't add money to the wallet."));
+      }
+    } finally {
       setIsToppingUp(false);
     }
   };
@@ -841,8 +768,8 @@ const Profile = () => {
                   </p>
                 </div>
                 <button 
-                  onClick={() => toast.info("Connecting to Pharmacy support desk...")}
-                  className="flex items-center gap-1.5 text-[11px] font-black text-[#d6335c] border border-rose-100 bg-rose-50/30 px-3.5 py-1.5 rounded-full hover:bg-rose-50 transition active:scale-95"
+                  onClick={() => setHelpOpen(true)}
+                  className="flex items-center gap-1.5 text-[11px] font-black text-[#d6335c] border border-rose-100 bg-rose-50/30 px-3.5 py-1.5 rounded-full hover:bg-rose-50 transition active:scale-95 dark:text-rose-300 dark:bg-rose-500/10 dark:border-rose-400/30 dark:hover:bg-rose-500/20"
                 >
                   <Headphones sx={{ fontSize: 13 }} />
                   <span>Get Help</span>
@@ -995,7 +922,7 @@ const Profile = () => {
                   {selectedOrder.status === "Delivered" && selectedOrder.deliveryTime && (
                     <div className="text-right">
                       <span className="text-[9px] text-slate-400 font-bold block uppercase tracking-wider">Arrived in</span>
-                      <span className="mt-1 inline-flex items-center gap-0.5 text-[10px] font-black text-indigo-750 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-full uppercase tracking-wider shadow-sm">
+                      <span className="mt-1 inline-flex items-center gap-0.5 text-[10px] font-black text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-full uppercase tracking-wider shadow-sm dark:text-indigo-200 dark:bg-indigo-500/15 dark:border-indigo-400/30 dark:shadow-none">
                         <Bolt sx={{ fontSize: 12 }} className="text-yellow-500" /> {selectedOrder.deliveryTime}
                       </span>
                     </div>
@@ -1181,7 +1108,7 @@ const Profile = () => {
                 {/* FEATURE HIGHLIGHTS */}
                 <div className="grid grid-cols-3 gap-2 py-2">
                   <div className="flex flex-col items-center text-center p-2">
-                    <div className="w-9 h-9 rounded-full bg-emerald-50 flex items-center justify-center mb-1.5">
+                    <div className="w-9 h-9 rounded-full bg-emerald-50 dark:bg-emerald-500/15 flex items-center justify-center mb-1.5">
                       <Bolt className="text-emerald-600 animate-pulse" sx={{ fontSize: 18 }} />
                     </div>
                     <span className="text-[10px] font-black text-slate-800 block uppercase leading-snug">Easy & Fast</span>
@@ -1189,7 +1116,7 @@ const Profile = () => {
                   </div>
 
                   <div className="flex flex-col items-center text-center p-2">
-                    <div className="w-9 h-9 rounded-full bg-emerald-50 flex items-center justify-center mb-1.5">
+                    <div className="w-9 h-9 rounded-full bg-emerald-50 dark:bg-emerald-500/15 flex items-center justify-center mb-1.5">
                       <Paid className="text-emerald-600" sx={{ fontSize: 16 }} />
                     </div>
                     <span className="text-[10px] font-black text-slate-800 block uppercase leading-snug">Instant</span>
@@ -1197,7 +1124,7 @@ const Profile = () => {
                   </div>
 
                   <div className="flex flex-col items-center text-center p-2">
-                    <div className="w-9 h-9 rounded-full bg-emerald-50 flex items-center justify-center mb-1.5">
+                    <div className="w-9 h-9 rounded-full bg-emerald-50 dark:bg-emerald-500/15 flex items-center justify-center mb-1.5">
                       <LocalOffer className="text-emerald-600 animate-pulse" sx={{ fontSize: 15 }} />
                     </div>
                     <span className="text-[10px] font-black text-slate-800 block uppercase leading-snug">Exclusive</span>
@@ -1207,13 +1134,13 @@ const Profile = () => {
 
                 {/* PHARMACY CASH CARD */}
                 <div className="bg-white border border-slate-100 rounded-[20px] p-5 shadow-sm flex items-start gap-4 hover:border-slate-200 transition duration-150">
-                  <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center flex-shrink-0">
+                  <div className="w-10 h-10 rounded-xl bg-amber-50 dark:bg-amber-500/15 flex items-center justify-center flex-shrink-0">
                     <Paid className="text-amber-500" sx={{ fontSize: 20 }} />
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center">
                       <h4 className="text-[12px] font-black text-slate-800 uppercase tracking-wide">Pharmacy Cash</h4>
-                      <span className="bg-rose-50 text-rose-500 border border-rose-100 rounded-md px-1.5 py-0.5 font-black uppercase text-[8px] tracking-wider ml-2.5">
+                      <span className="bg-rose-50 text-rose-500 border border-rose-100 dark:bg-rose-500/15 dark:text-rose-300 dark:border-rose-400/30 rounded-md px-1.5 py-0.5 font-black uppercase text-[8px] tracking-wider ml-2.5">
                         UNAVAILABLE
                       </span>
                     </div>
@@ -1403,7 +1330,7 @@ const Profile = () => {
                                   <span className="text-[10px] text-slate-400 font-bold">•</span>
                                   <span className="text-[10px] text-slate-400 font-extrabold">{getMockDistance(a.id)}</span>
                                   {a.primary && (
-                                    <span className="text-[9px] font-black text-orangeBrand bg-orange-50 px-1.5 py-0.5 rounded-full border border-orange-100 uppercase tracking-wider ml-1">
+                                    <span className="text-[9px] font-black text-orangeBrand bg-orange-50 px-1.5 py-0.5 rounded-full border border-orange-100 dark:bg-orange-500/15 dark:border-orange-400/30 uppercase tracking-wider ml-1">
                                       Primary
                                     </span>
                                   )}
@@ -1618,7 +1545,7 @@ const Profile = () => {
                       type="button"
                       onClick={handleGetLocation}
                       disabled={isFetchingLocation}
-                      className="px-4 py-3 bg-orange-50 hover:bg-orangeBrand/10 border border-orangeBrand/20 text-orangeBrand font-extrabold text-[11px] rounded-xl uppercase tracking-wider transition active:scale-95 disabled:opacity-50 duration-150 flex items-center justify-center gap-1.5 shadow-sm"
+                      className="px-4 py-3 bg-orange-50 dark:bg-orange-500/15 hover:bg-orangeBrand/10 border border-orangeBrand/20 text-orangeBrand font-extrabold text-[11px] rounded-xl uppercase tracking-wider transition active:scale-95 disabled:opacity-50 duration-150 flex items-center justify-center gap-1.5 shadow-sm"
                       title="Get Current Location"
                     >
                       {isFetchingLocation ? (
@@ -1651,7 +1578,7 @@ const Profile = () => {
             {/* SECURITY TAB */}
             {activeTab === "security" && (
               <div className="space-y-4">
-                <div className="p-4 bg-orange-50 border border-orange-700 rounded-2xl text-[11px] text-orange-800 font-extrabold flex items-start gap-2.5">
+                <div className="p-4 bg-orange-50 border border-orange-700 rounded-2xl text-[11px] text-orange-800 dark:bg-orange-500/10 dark:border-orange-400/40 dark:text-orange-200 font-extrabold flex items-start gap-2.5">
                   <Lock className="mt-0.5 flex-shrink-0" sx={{ fontSize: 15 }} />
                   <span>If you are using a shared device, please logout cleanly to wipe cached prescription images.</span>
                 </div>
@@ -1687,7 +1614,7 @@ const Profile = () => {
                             <ScienceOutlined className="text-orangeBrand" sx={{ fontSize: 16 }} />
                             <span className="text-[12px] font-black text-slate-800">{b.testName}</span>
                           </div>
-                          <span className="text-[11px] font-extrabold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-600 uppercase tracking-wider border border-emerald-100">
+                          <span className="text-[11px] font-extrabold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-600 uppercase tracking-wider border border-emerald-100 dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-400/30">
                             {b.status || "BOOKED"}
                           </span>
                         </div>
@@ -1868,7 +1795,7 @@ const Profile = () => {
                   }`}
                 >
                   <span className="text-[11px] block">UPI / QR Code</span>
-                  <span className="text-[8px] text-gray-400 block font-normal">Simulated QR Code</span>
+                  <span className="text-[8px] text-gray-400 block font-normal">GPay, PhonePe, Paytm or QR</span>
                 </button>
               </div>
             </div>
@@ -1878,66 +1805,13 @@ const Profile = () => {
               disabled={isToppingUp || !topUpAmount || parseFloat(topUpAmount) <= 0}
               className="w-full bg-[#006A4E] hover:bg-[#005740] disabled:bg-slate-200 disabled:text-slate-450 text-white font-extrabold text-xs py-4 rounded-full transition shadow-md active:scale-[0.98] uppercase tracking-wider"
             >
-              {isToppingUp ? "Processing..." : topUpMethod === "upi" ? "Simulate UPI Payment" : "Proceed to Pay"}
+              {isToppingUp ? "Processing..." : topUpMethod === "upi" ? "Pay with UPI" : "Proceed to Pay"}
             </button>
           </div>
         </div>
       )}
 
-      {/* UPI QR CODE WALLET MODAL */}
-      {showUpiModal && simulatedWalletOrder && (
-        <div className="fixed inset-0 bg-black/60 flex justify-center items-center z-[2300] px-3 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl p-6 shadow-2xl max-w-sm w-full text-center space-y-5 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex justify-between items-center pb-2 border-b border-gray-100">
-              <h3 className="text-xs font-black text-gray-800 uppercase tracking-wider">UPI / QR Code Wallet Top-Up</h3>
-              <button 
-                onClick={() => {
-                  setShowUpiModal(false);
-                  toast.warn("Payment dismissed.");
-                }} 
-                className="text-gray-400 hover:text-gray-600 font-extrabold text-sm"
-              >
-                ✕
-              </button>
-            </div>
-            
-            <div className="space-y-1">
-              <span className="text-[10px] text-gray-400 font-extrabold uppercase tracking-wider block">Wallet Top-up Amount</span>
-              <span className="text-2xl font-black text-gray-900 block">₹{simulatedWalletOrder.amount / 100}</span>
-            </div>
-
-            <div className="flex justify-center p-3 bg-slate-50 rounded-2xl border border-slate-100 shadow-inner">
-              <img 
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(`upi://pay?pa=7671085919@ybl&pn=Pharmacy%20Wallet&am=${simulatedWalletOrder.amount / 100}&cu=INR&tn=WalletTopup`)}`} 
-                alt="Wallet UPI Payment QR Code" 
-                className="w-[180px] h-[180px] object-contain"
-              />
-            </div>
-
-            <div className="text-[10px] text-gray-400 font-bold leading-relaxed px-4">
-              Scan this QR code to add money to your wallet via UPI, then click "Simulate Success" below to verify.
-            </div>
-
-            <div className="space-y-2 pt-2">
-              <button
-                onClick={() => handleWalletUpiSuccess()}
-                className="w-full bg-[#006A4E] hover:bg-[#005740] text-white font-extrabold text-xs py-3.5 rounded-xl shadow-md transition duration-200 active:scale-95 uppercase tracking-wider"
-              >
-                Simulate Payment Success
-              </button>
-              <button
-                onClick={() => {
-                  setShowUpiModal(false);
-                  toast.warn("Payment dismissed.");
-                }}
-                className="w-full border border-gray-200 hover:bg-slate-50 text-gray-500 font-extrabold text-xs py-3 rounded-xl transition duration-200 active:scale-95 uppercase tracking-wider"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <SupportChat open={helpOpen} onClose={closeHelp} order={selectedOrder} />
     </div>
   );
 };
