@@ -15,6 +15,7 @@ import { syncUserFromServer } from "../../utils/wallet";
 import { updateOrderStatus, getOrderDetails, updateOrderDeliveryDetails } from "../../api/orderService";
 import { fetchAllProducts } from "../../api/productService";
 import { getDeliveryCode } from "../../api/partnerService";
+import { estimateDelivery, formatMinutes } from "../../utils/deliveryEta";
 
 /** Store, rider and the delivery code the customer gives the rider on arrival. */
 const DeliveryCodePanel = ({ order }) => {
@@ -164,6 +165,11 @@ const OrderTracking = () => {
           address: data.address,
           deliveryInstructions: data.deliveryInstructions,
           vendorName: data.vendorName,
+          // Written by the vendor and rider portals; they drive the delivery estimate.
+          acceptedAt: data.acceptedAt,
+          packedAt: data.packedAt,
+          pickedUpAt: data.pickedUpAt,
+          deliveredAt: data.deliveredAt,
           deliveryPartnerName: data.deliveryPartnerName,
           deliveryPartnerPhone: data.deliveryPartnerPhone
         });
@@ -230,31 +236,18 @@ const OrderTracking = () => {
   useEffect(() => {
     const timer = setInterval(() => {
       setNowTime(new Date());
-    }, 30000);
+    }, 15000);
     return () => clearInterval(timer);
   }, []);
 
-  const remainingMins = useMemo(() => {
-    if (!order) return 15;
-    const createdAtStr = order.createdAt || order.date;
-    let placedTime;
-    try {
-      placedTime = new Date(createdAtStr);
-      if (isNaN(placedTime.getTime())) {
-        return parseInt(order.deliveryTime) || 24;
-      }
-    } catch (e) {
-      return parseInt(order.deliveryTime) || 24;
-    }
-    const diffMs = nowTime - placedTime;
-    const diffMins = Math.floor(diffMs / 60000);
-    const totalDuration = parseInt(order.deliveryTime) || 20;
-    const remaining = totalDuration - diffMins;
-    
-    // Clamp to 5 to 20 mins range
-    const clamped = Math.max(5, Math.min(20, remaining));
-    return clamped;
-  }, [order, nowTime]);
+  // Estimate from where the order really is (accepted, packed, picked up), refreshed as the
+  // vendor and rider move it along and as the clock ticks.
+  const eta = useMemo(() => (order ? estimateDelivery(order, nowTime) : { kind: "none" }), [order, nowTime]);
+  const etaLabel =
+    eta.kind === "eta" ? `Arriving in ${formatMinutes(eta.minutes)} • ${eta.late ? "Running late" : "On time"}`
+    : eta.kind === "delivered" ? (eta.minutes ? `Delivered in ${formatMinutes(eta.minutes)}` : "Delivered")
+    : eta.kind === "awaiting-payment" ? "Starts once payment is confirmed"
+    : null;
 
 
   const handleReorder = () => {
@@ -450,9 +443,13 @@ const OrderTracking = () => {
                 </div>
                 
                 <div className="flex items-center gap-2">
-                  <span className="bg-[#e05624]/65 border border-orange-400/30 text-white font-extrabold text-xs px-3.5 py-2 rounded-full flex items-center gap-1.5 shadow-sm">
-                    Arriving in {remainingMins > 0 ? `${remainingMins} mins` : "shortly"} • On time
-                  </span>
+                  {etaLabel && (
+                    <span className={`border text-white font-extrabold text-xs px-3.5 py-2 rounded-full flex items-center gap-1.5 shadow-sm ${
+                      eta.late ? "bg-rose-700/70 border-rose-300/40" : "bg-[#e05624]/65 border-orange-400/30"
+                    }`}>
+                      {etaLabel}
+                    </span>
+                  )}
                   <button 
                     disabled={isRefreshing}
                     onClick={() => {
