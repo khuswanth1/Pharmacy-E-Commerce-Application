@@ -8,12 +8,14 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.pharmacy.auth.dto.AuthRequest;
 import com.pharmacy.auth.dto.ForgotPasswordRequest;
 import com.pharmacy.auth.dto.GoogleLoginRequest;
+import com.pharmacy.auth.dto.PartnerRegisterRequest;
 import com.pharmacy.auth.dto.RegisterRequest;
 import com.pharmacy.auth.dto.ResetPasswordRequest;
 import com.pharmacy.auth.dto.TokenResponse;
@@ -57,6 +59,20 @@ public class AuthController {
                 Map.of("id", u.getId(), "email", u.getEmail()));
     }
 
+    @PostMapping("/register/partner")
+    @Operation(summary = "Sign up as a vendor or delivery partner (starts pending admin approval)")
+    public ApiResponse<TokenResponse> registerPartner(@RequestBody @Valid PartnerRegisterRequest req) {
+        User u = authService.registerPartner(req);
+        return ApiResponse.ok("Application submitted. An admin will review it shortly.",
+                authService.issueToken(u));
+    }
+
+    @PostMapping("/token/refresh")
+    @Operation(summary = "Issue a fresh token reflecting the account's current roles and approval status")
+    public ApiResponse<TokenResponse> refreshToken(@RequestHeader("X-User-Id") String userId) {
+        return ApiResponse.ok("Token refreshed", authService.refreshToken(userId));
+    }
+
     @PostMapping("/login")
     @Operation(summary = "Authenticate with email and password")
     public ApiResponse<TokenResponse> login(@RequestBody @Valid AuthRequest req) {
@@ -76,7 +92,12 @@ public class AuthController {
     @Operation(summary = "Sign in with a Google ID token (Google Identity Services)")
     public ApiResponse<TokenResponse> googleLogin(@RequestBody GoogleLoginRequest req) {
         TokenResponse token;
-        if (req.idToken() != null && !req.idToken().isBlank()) {
+        if (req.role() != null && !req.role().isBlank()) {
+            if (req.idToken() == null || req.idToken().isBlank()) {
+                throw new IllegalArgumentException("Partner Google sign-in needs a Google ID token");
+            }
+            token = authService.loginPartnerWithGoogle(req.idToken(), req.role());
+        } else if (req.idToken() != null && !req.idToken().isBlank()) {
             token = authService.loginWithGoogleIdToken(req.idToken());
         } else if (req.email() != null && !req.email().isBlank()) {
             User u = authService.provisionGoogleUser(req.email(), req.name(), null, null);
@@ -98,14 +119,6 @@ public class AuthController {
     public ApiResponse<UserResponse> updateProfile(@PathVariable String id,
                                                    @RequestBody UpdateProfileRequest req) {
         return ApiResponse.ok("Profile updated", UserResponse.from(profileService.update(id, req)));
-    }
-
-    @PostMapping("/wallet/{id}/add")
-    @Operation(summary = "Atomically add an amount to a user's wallet balance")
-    public ApiResponse<UserResponse> addWalletBalance(@PathVariable String id,
-                                                      @RequestBody Map<String, Object> body) {
-        double amount = ((Number) body.get("amount")).doubleValue();
-        return ApiResponse.ok("Wallet balance updated", UserResponse.from(profileService.addWalletBalance(id, amount)));
     }
 
     @PostMapping("/forgot")

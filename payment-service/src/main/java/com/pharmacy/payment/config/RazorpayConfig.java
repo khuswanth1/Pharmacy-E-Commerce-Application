@@ -5,53 +5,45 @@ import com.razorpay.RazorpayException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 
 /**
- * Razorpay configuration.
- *
- * Keys are read from application.yml:
- *   razorpay:
- *     key-id:     rzp_test_...
- *     key-secret: ...
- *
- * Spring maps YAML dashes to camelCase so both
- *   @Value("${razorpay.key-id}")   and
- *   @Value("${razorpay.keyId}")    work.
+ * Razorpay keys come from RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET (backend/.env).
+ * Without them the service still starts, cash on delivery and wallet payments still
+ * work, and online payments fail with a clear "not configured" message.
  */
-@Configuration
+@Component
 public class RazorpayConfig {
 
     private static final Logger log = LoggerFactory.getLogger(RazorpayConfig.class);
 
-    @Value("${razorpay.key-id}")
-    private String keyId;
+    private final String keyId;
+    private final String keySecret;
+    private final RazorpayClient client;
 
-    @Value("${razorpay.key-secret}")
-    private String keySecret;
-
-    /**
-     * Exposes a singleton {@link RazorpayClient} bean so every service
-     * can inject it instead of constructing a new instance per request.
-     */
-    @Bean
-    public RazorpayClient razorpayClient() throws RazorpayException {
-        String maskedKeyId = keyId != null ? (keyId.substring(0, Math.min(keyId.length(), 12)) + "...") : "null";
-        String maskedSecret = keySecret != null ? (keySecret.substring(0, Math.min(keySecret.length(), 4)) + "..." + keySecret.substring(Math.max(0, keySecret.length() - 4))) : "null";
-        log.info("Initializing RazorpayClient | keyId={} | keySecret={} (length={})", maskedKeyId, maskedSecret, keySecret != null ? keySecret.length() : 0);
-        return new RazorpayClient(keyId, keySecret);
+    public RazorpayConfig(@Value("${razorpay.key-id:}") String keyId,
+                          @Value("${razorpay.key-secret:}") String keySecret) throws RazorpayException {
+        this.keyId = keyId == null ? "" : keyId.trim();
+        this.keySecret = keySecret == null ? "" : keySecret.trim();
+        if (this.keyId.isEmpty() || this.keySecret.isEmpty()) {
+            log.warn("Razorpay keys are not set (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET). Online payments are disabled.");
+            this.client = null;
+        } else {
+            log.info("Razorpay configured | keyId={} | mode={}", this.keyId,
+                    this.keyId.startsWith("rzp_live_") ? "LIVE" : "TEST");
+            this.client = new RazorpayClient(this.keyId, this.keySecret);
+        }
     }
 
-    /** Exposes the key-id so PaymentService can return it in responses. */
-    @Bean(name = "razorpayKeyId")
-    public String razorpayKeyId() {
-        return keyId;
+    /** @throws IllegalStateException if the keys are not configured. */
+    public RazorpayClient client() {
+        if (client == null) {
+            throw new IllegalStateException("Online payments are not set up yet. Please pay by cash on delivery or wallet.");
+        }
+        return client;
     }
 
-    /** Exposes the key-secret so PaymentService can verify HMAC signatures. */
-    @Bean(name = "razorpayKeySecret")
-    public String razorpayKeySecret() {
-        return keySecret;
-    }
+    public String keyId() { return keyId; }
+
+    public String keySecret() { return keySecret; }
 }

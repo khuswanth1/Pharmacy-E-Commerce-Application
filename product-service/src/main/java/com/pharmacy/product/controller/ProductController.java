@@ -130,15 +130,7 @@ public class ProductController {
         return ApiResponse.ok("Product", products.findById(id).orElseThrow(() -> new IllegalArgumentException("Product not found")));
     }
 
-    @PostMapping("/categories")
-    public ApiResponse<Category> createCategory(@RequestBody Category c) {
-        return ApiResponse.ok("Category created", categories.save(c));
-    }
-
-    @PostMapping
-    public ApiResponse<Product> create(@RequestBody Product p) {
-        return ApiResponse.ok("Product created", products.save(p));
-    }
+    // Creating products and categories is admin-only: see PartnerProductController (/api/products/admin).
 
     // @GetMapping("/lab-bookings")
     // public ApiResponse<List<LabTestBooking>> getAllLabBookings() {

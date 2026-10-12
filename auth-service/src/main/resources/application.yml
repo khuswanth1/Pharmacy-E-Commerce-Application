@@ -27,8 +27,8 @@ spring:
       client:
         registration:
           google:
-            client-id: ${GOOGLE_CLIENT_ID:google-client-id-placeholder}
-            client-secret: ${GOOGLE_CLIENT_SECRET:google-client-secret-placeholder}
+            client-id: ${GOOGLE_CLIENT_ID:}
+            client-secret: ${GOOGLE_CLIENT_SECRET:}
             scope: openid,profile,email
             redirect-uri: ${GOOGLE_REDIRECT_URI:http://localhost:8089/login/oauth2/code/google}
 
@@ -36,6 +36,12 @@ spring:
 app:
   jwt-secret: ${JWT_SECRET:pharmacy_super_secret_key_please_change}
   jwt-expiration-ms: ${JWT_EXPIRATION_MS:86400000}
+  # Shared secret for service-to-service calls (see InternalToken).
+  internal-token: ${INTERNAL_API_TOKEN:6uU9zx0CUpYsgi7yNdf_jHnHmutiDQPkXdpOkQnr_Fw}
+  # First admin account, created on startup if it does not exist (see AdminSeeder).
+  admin:
+    email: ${ADMIN_EMAIL:}
+    password: ${ADMIN_PASSWORD:}
   geoapify-key: ${GEOAPIFY_KEY:0ba2a0054b5845ad8fb86a37fdadf5c5}
   oauth2:
     # Where the React app reads ?token=&userId= after a successful Google login.

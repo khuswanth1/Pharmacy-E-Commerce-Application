@@ -1,10 +1,12 @@
 package com.pharmacy.auth.dto;
 
+import java.time.LocalDateTime;
 import java.util.Set;
 
 import com.pharmacy.auth.entity.AuthProvider;
 import com.pharmacy.auth.entity.User;
 import com.pharmacy.common.Gender;
+import com.pharmacy.common.PartnerStatus;
 import com.pharmacy.common.Role;
 
 /**
@@ -21,7 +23,11 @@ public record UserResponse(
         Gender gender,
         AuthProvider provider,
         Set<Role> roles,
-        double walletBalance
+        double walletBalance,
+        PartnerStatus partnerStatus,
+        boolean enabled,
+        LocalDateTime createdAt,
+        LocalDateTime lastLoginAt
 ) {
     public static UserResponse from(User u) {
         return new UserResponse(
@@ -35,7 +41,11 @@ public record UserResponse(
                 u.getGender(),
                 u.getProvider(),
                 u.getRoles(),
-                u.getWalletBalance()
+                u.getWalletBalance(),
+                u.getPartnerStatus(),
+                u.isEnabled(),
+                u.getCreatedAt(),
+                u.getLastLoginAt()
         );
     }
 }

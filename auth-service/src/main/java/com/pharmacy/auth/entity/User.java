@@ -4,6 +4,7 @@ import java.time.LocalDateTime;
 import java.util.Set;
 
 import com.pharmacy.common.Gender;
+import com.pharmacy.common.PartnerStatus;
 import com.pharmacy.common.Role;
 
 import jakarta.persistence.CollectionTable;
@@ -70,6 +71,18 @@ public class User {
     private boolean enabled = true;
 
     private double walletBalance = 0.0;
+
+    /** Approval state for vendor / delivery accounts; null for customers and admins. */
+    @Enumerated(EnumType.STRING)
+    private PartnerStatus partnerStatus;
+
+    private LocalDateTime lastLoginAt;
+
+    public LocalDateTime getLastLoginAt() { return lastLoginAt; }
+    public void setLastLoginAt(LocalDateTime lastLoginAt) { this.lastLoginAt = lastLoginAt; }
+
+    public PartnerStatus getPartnerStatus() { return partnerStatus; }
+    public void setPartnerStatus(PartnerStatus partnerStatus) { this.partnerStatus = partnerStatus; }
 
     public double getWalletBalance() { return walletBalance; }
     public void setWalletBalance(double walletBalance) { this.walletBalance = walletBalance; }

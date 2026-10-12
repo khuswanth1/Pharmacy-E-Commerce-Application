@@ -34,7 +34,15 @@ public class Product {
     @Column(length = 1000)
     private String composition;
 
+    /** Vendor who listed the product; null for the store's own catalogue. */
+    private String vendorId;
+    private String vendorName;
+
     public String getId() { return id; }
+    public String getVendorId() { return vendorId; }
+    public void setVendorId(String vendorId) { this.vendorId = vendorId; }
+    public String getVendorName() { return vendorName; }
+    public void setVendorName(String vendorName) { this.vendorName = vendorName; }
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
     public String getDescription() { return description; }

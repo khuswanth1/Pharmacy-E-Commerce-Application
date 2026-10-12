@@ -3,10 +3,12 @@
 # Ensure execution policy allows running this script locally in this session if needed
 # Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
-# Load environment variables from .env file if it exists
-if (Test-Path "$PSScriptRoot\.env") {
-    Write-Host "Loading environment variables from .env..." -ForegroundColor Gray
-    Get-Content "$PSScriptRoot\.env" | Where-Object { $_ -and -not $_.StartsWith("#") } | ForEach-Object {
+# Load environment variables from .env, then .env.local (git-ignored local secrets such as
+# GROQ_API_KEY), so values in .env.local win.
+foreach ($envFile in @(".env", ".env.local")) {
+  if (Test-Path "$PSScriptRoot\$envFile") {
+    Write-Host "Loading environment variables from $envFile..." -ForegroundColor Gray
+    Get-Content "$PSScriptRoot\$envFile" | Where-Object { $_ -and -not $_.StartsWith("#") } | ForEach-Object {
         $parts = $_ -split '=', 2
         if ($parts.Length -eq 2) {
             $key = $parts[0].Trim()
@@ -16,6 +18,7 @@ if (Test-Path "$PSScriptRoot\.env") {
             [System.Environment]::SetEnvironmentVariable($key, $val, [System.EnvironmentVariableTarget]::Process)
         }
     }
+  }
 }
 
 # Helper function to free a port before starting a service

@@ -21,6 +21,22 @@ public class PaymentEntity {
     private String currency = "INR";
     private String paymentMethod;
 
+    /** Who paid. Null on rows created before this was recorded. */
+    private String userId;
+
+    /** What the money is for. Stored as text so new values need no column change. */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 20, columnDefinition = "varchar(20)")
+    private Purpose purpose;
+
+    /** True once the order was marked paid / the wallet credited after a successful payment. */
+    @Column(columnDefinition = "bit default 0")
+    private Boolean fulfilled = false;
+
+    private LocalDateTime refundedAt;
+
+    public enum Purpose { ORDER, WALLET_TOPUP, LAB_TEST }
+
     @Enumerated(EnumType.STRING)
     private PaymentStatus paymentStatus = PaymentStatus.PENDING;
 
@@ -45,6 +61,7 @@ public class PaymentEntity {
     public void setRazorpayOrderId(String razorpayOrderId) { this.razorpayOrderId = razorpayOrderId; }
     public String getRazorpayPaymentId() { return razorpayPaymentId; }
     public void setRazorpayPaymentId(String razorpayPaymentId) { this.razorpayPaymentId = razorpayPaymentId; }
+    @com.fasterxml.jackson.annotation.JsonIgnore
     public String getRazorpaySignature() { return razorpaySignature; }
     public void setRazorpaySignature(String razorpaySignature) { this.razorpaySignature = razorpaySignature; }
     public BigDecimal getAmount() { return amount; }
@@ -53,6 +70,14 @@ public class PaymentEntity {
     public void setCurrency(String currency) { this.currency = currency; }
     public String getPaymentMethod() { return paymentMethod; }
     public void setPaymentMethod(String paymentMethod) { this.paymentMethod = paymentMethod; }
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    public Purpose getPurpose() { return purpose; }
+    public void setPurpose(Purpose purpose) { this.purpose = purpose; }
+    public boolean isFulfilled() { return Boolean.TRUE.equals(fulfilled); }
+    public void setFulfilled(boolean fulfilled) { this.fulfilled = fulfilled; }
+    public LocalDateTime getRefundedAt() { return refundedAt; }
+    public void setRefundedAt(LocalDateTime refundedAt) { this.refundedAt = refundedAt; }
     public PaymentStatus getPaymentStatus() { return paymentStatus; }
     public void setPaymentStatus(PaymentStatus paymentStatus) { this.paymentStatus = paymentStatus; }
     public LocalDateTime getCreatedAt() { return createdAt; }
