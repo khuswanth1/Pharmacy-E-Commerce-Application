@@ -1,7 +1,6 @@
 package com.pharmacy.payment.dto;
 
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Positive;
 
 /**
  * Request body for POST /api/payments/create-order
@@ -14,8 +13,11 @@ public class PaymentOrderRequest {
     @NotBlank(message = "orderId is required")
     private String orderId;
 
-    @Positive(message = "amount must be positive")
-    private long amount; // in paise (e.g. 49900 = ₹499)
+    /**
+     * In paise (e.g. 49900 = ₹499). Only used for wallet top-ups (WLT_) and lab tests (LAB_);
+     * medicine orders are always charged their total from order-service.
+     */
+    private long amount;
 
     /** Optional – client passes the chosen payment method for record keeping. */
     private String paymentMethod = "RAZORPAY";

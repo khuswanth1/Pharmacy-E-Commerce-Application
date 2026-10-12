@@ -4,6 +4,7 @@ import com.pharmacy.common.Gender;
 
 /**
  * Partial profile update. Any {@code null} field is left unchanged.
+ * The wallet balance is not editable here: only payment-service changes it.
  */
 public record UpdateProfileRequest(
         String name,
@@ -12,6 +13,5 @@ public record UpdateProfileRequest(
         String geolocation,
         Gender gender,
         String picture,
-        String email,
-        Double walletBalance
+        String email
 ) {}

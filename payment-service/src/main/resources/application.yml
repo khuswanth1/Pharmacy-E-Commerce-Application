@@ -19,13 +19,19 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.MySQLDialect
 
+# Set RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET in backend/.env. No defaults on purpose.
 razorpay:
-  key-id: ${RAZORPAY_KEY_ID:rzp_test_T6dPUc4yPxTBNw}
-  key-secret: ${RAZORPAY_KEY_SECRET:5RiyDQ8eyzsdxcZca2SiJbWA}
+  key-id: ${RAZORPAY_KEY_ID:}
+  key-secret: ${RAZORPAY_KEY_SECRET:}
 
-# Used by OpenApiConfig to set the server URL in Swagger docs
 app:
+  # Used by OpenApiConfig to set the server URL in Swagger docs
   gateway-url: http://localhost:8089
+  # Direct service URLs for service-to-service calls (not the gateway).
+  order-service-url: ${ORDER_SERVICE_URL:http://localhost:8084}
+  auth-service-url: ${AUTH_SERVICE_URL:http://localhost:8081}
+  product-service-url: ${PRODUCT_SERVICE_URL:http://localhost:8082}
+  internal-token: ${INTERNAL_API_TOKEN:6uU9zx0CUpYsgi7yNdf_jHnHmutiDQPkXdpOkQnr_Fw}
 
 springdoc:
   api-docs:
@@ -35,6 +41,6 @@ springdoc:
 
 logging:
   level:
-    com.anandpharmacy.payment: INFO
+    com.pharmacy.payment: INFO
 
 

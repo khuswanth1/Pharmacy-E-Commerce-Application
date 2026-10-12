@@ -50,21 +50,6 @@ public class ProfileService {
                 u.setPicture(req.picture());
             }
         }
-        if (req.walletBalance() != null) {
-            u.setWalletBalance(req.walletBalance());
-        }
-        return users.save(u);
-    }
-
-    /**
-     * Atomically adds {@code amount} to the user's current wallet balance and
-     * persists the result. Using the DB record as source-of-truth avoids stale
-     * frontend-closure bugs.
-     */
-    @Transactional
-    public User addWalletBalance(String id, double amount) {
-        User u = getById(id);
-        u.setWalletBalance(u.getWalletBalance() + amount);
         return users.save(u);
     }
 }

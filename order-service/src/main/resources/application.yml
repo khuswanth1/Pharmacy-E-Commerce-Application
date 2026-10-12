@@ -3,6 +3,12 @@ server:
 spring:
   application:
     name: order-service
+  config:
+    # Local secrets that must never be committed (git-ignored). Same KEY=value format as .env.
+    # ../ when started with "mvnw spring-boot:run -pl order-service", ./ when started from backend/.
+    import:
+      - optional:file:../.env.local[.properties]
+      - optional:file:./.env.local[.properties]
   datasource:
     url:  jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:pharmacy_order}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
     username: ${DB_USERNAME:root}
@@ -13,5 +19,12 @@ spring:
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
-
-
+app:
+  # Shared secret for service-to-service calls (see InternalToken).
+  internal-token: ${INTERNAL_API_TOKEN:6uU9zx0CUpYsgi7yNdf_jHnHmutiDQPkXdpOkQnr_Fw}
+  # "Get Help" chat assistant (OpenAI-compatible API, Groq by default). Put GROQ_API_KEY in
+  # backend/.env.local. Without a key the chat answers "not set up yet" instead of failing.
+  chat:
+    api-key: ${GROQ_API_KEY:}
+    model: ${GROQ_MODEL:openai/gpt-oss-120b}
+    base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}

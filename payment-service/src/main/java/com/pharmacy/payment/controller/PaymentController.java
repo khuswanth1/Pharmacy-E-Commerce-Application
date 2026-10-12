@@ -1,5 +1,6 @@
 package com.pharmacy.payment.controller;
 
+import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -9,7 +10,6 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -26,111 +26,99 @@ import com.pharmacy.payment.service.PaymentService;
 import com.razorpay.RazorpayException;
 
 /**
- * REST Controller — Payment Service
- *
- * Base path  : /api/payments
- * Routes via : API Gateway (port 8089) → Payment Service (port 8085)
- *
- * POST /api/payments/create-order   — create Razorpay order (UPI, Card, Wallet, PayLater)
- * POST /api/payments/verify         — verify HMAC-SHA256 signature → mark SUCCESS/FAILED
- * GET  /api/payments                — list all payment records (admin)
+ * Payments, reached through the API gateway, which sets X-User-Id from the login token.
+ * /api/payments/admin/** is restricted to admins by the gateway.
  */
-@Tag(name = "Payment Service", description = "Razorpay payment gateway integration — supports UPI, Cards, Wallets, PayLater, and COD")
+@Tag(name = "Payment Service", description = "Razorpay (UPI, cards, net banking), wallet and cash on delivery")
 @RestController
 @RequestMapping("/api/payments")
 public class PaymentController {
 
     private static final Logger log = LoggerFactory.getLogger(PaymentController.class);
+    private static final String USER = "X-User-Id";
 
-    @Autowired
-    private PaymentService paymentService;
+    private final PaymentService paymentService;
 
-    // =========================================================================
-    // POST /api/payments/create-order
-    //
-    // Body     : { "orderId": "101", "amount": 49900, "paymentMethod": "UPI" }
-    //            amount is in paise. paymentMethod is optional (default RAZORPAY).
-    //            Use paymentMethod=COD to skip Razorpay and record a COD payment.
-    // Response : ApiResponse<{ razorpayOrderId, keyId, amount, currency }>
-    // =========================================================================
-    @Operation(
-        summary = "Create Payment Order",
-        description = "Creates a Razorpay order for online payments (UPI/Card/Wallet/PayLater). " +
-                      "Pass paymentMethod=COD to record a Cash on Delivery order without Razorpay."
-    )
+    public PaymentController(PaymentService paymentService) {
+        this.paymentService = paymentService;
+    }
+
+    @Operation(summary = "Create a Razorpay order, or record cash on delivery",
+            description = "Body: { orderId, amount (paise), paymentMethod }. For medicine orders the amount is "
+                    + "taken from the order; for WLT_ (wallet top-up) and LAB_ (lab test) ids it is the requested amount.")
     @PostMapping("/create-order")
-    public ResponseEntity<ApiResponse<PaymentOrderResponse>> createOrder(
-            @Valid @RequestBody PaymentOrderRequest request) throws RazorpayException {
-
-        log.info("create-order | orderId={} amount={} method={}",
-                request.getOrderId(), request.getAmount(), request.getPaymentMethod());
-
-        PaymentOrderResponse resp = paymentService.createOrder(request);
-
-        return ResponseEntity.ok(ApiResponse.ok("Razorpay order created", resp));
+    public ApiResponse<PaymentOrderResponse> createOrder(@Valid @RequestBody PaymentOrderRequest request,
+                                                         @RequestHeader(value = USER, required = false) String userId)
+            throws RazorpayException {
+        log.info("create-order | orderId={} method={} userId={}", request.getOrderId(), request.getPaymentMethod(), userId);
+        return ApiResponse.ok("Payment order created", paymentService.createOrder(request, userId));
     }
 
-    // =========================================================================
-    // POST /api/payments/verify
-    //
-    // Body     : { "razorpayOrderId": "...", "razorpayPaymentId": "...", "razorpaySignature": "..." }
-    // Response : ApiResponse<{ "status": "SUCCESS" | "FAILED" }>
-    // =========================================================================
-    @Operation(
-        summary = "Verify Payment Signature",
-        description = "Verifies the Razorpay HMAC-SHA256 signature returned after payment. " +
-                      "Updates the payment record status to SUCCESS or FAILED."
-    )
+    @Operation(summary = "Verify a Razorpay payment, then mark the order paid or credit the wallet")
     @PostMapping("/verify")
-    public ResponseEntity<ApiResponse<Map<String, String>>> verifyPayment(
-            @Valid @RequestBody PaymentVerificationRequest request) {
-
-        log.info("verify | razorpayOrderId={}", request.getRazorpayOrderId());
-
+    public ApiResponse<Map<String, String>> verifyPayment(@Valid @RequestBody PaymentVerificationRequest request) {
         PaymentStatus status = paymentService.verifyPayment(request);
-
-        Map<String, String> result = new HashMap<>();
-        result.put("status", status.name());   // "SUCCESS" or "FAILED"
-
-        return ResponseEntity.ok(ApiResponse.ok("Payment verification complete", result));
+        return ApiResponse.ok("Payment verified", Map.of("status", status.name()));
     }
 
-    // =========================================================================
-    // GET /api/payments
-    // Returns all payment records — useful for admin/debug via Swagger
-    // =========================================================================
-    @Operation(summary = "List All Payments", description = "Returns all payment records stored in the database.")
-    @GetMapping
-    public ResponseEntity<ApiResponse<List<PaymentEntity>>> getAllPayments() {
-        return ResponseEntity.ok(ApiResponse.ok("Payments", paymentService.getAllPayments()));
+    @Operation(summary = "Pay an order or lab test from the wallet",
+            description = "Body: { orderId, amount (paise, lab tests only) }")
+    @PostMapping("/wallet/pay")
+    public ApiResponse<PaymentEntity> payWithWallet(@RequestBody Map<String, Object> body,
+                                                    @RequestHeader(value = USER, required = false) String userId) {
+        String orderId = body == null || body.get("orderId") == null ? null : String.valueOf(body.get("orderId")).trim();
+        if (orderId == null || orderId.isEmpty()) {
+            throw new IllegalArgumentException("orderId is required");
+        }
+        long amount = body.get("amount") instanceof Number n ? n.longValue() : 0;
+        return ApiResponse.ok("Paid from wallet", paymentService.payWithWallet(orderId, amount, userId));
     }
 
-    @Operation(summary = "Get Payment by ID", description = "Fetch a specific payment record by its system generated UUID.")
-    @GetMapping("/{id}")
-    public ResponseEntity<ApiResponse<PaymentEntity>> getPaymentById(@PathVariable String id) {
-        return ResponseEntity.ok(ApiResponse.ok("Payment found", paymentService.getPaymentById(id)));
+    @Operation(summary = "Refund a cancelled, paid order to the wallet", description = "Body: { orderId }")
+    @PostMapping("/refund-to-wallet")
+    public ApiResponse<Map<String, Object>> refundToWallet(@RequestBody Map<String, String> body,
+                                                           @RequestHeader(value = USER, required = false) String userId) {
+        BigDecimal refunded = paymentService.refundToWallet(body.get("orderId"), userId);
+        return ApiResponse.ok(refunded.signum() > 0 ? "Refunded to wallet" : "Nothing was paid for this order",
+                Map.of("refunded", refunded));
     }
 
-    @Operation(summary = "Get Payment by Order ID", description = "Fetch a specific payment record by its original order ID.")
-    @GetMapping("/order/{orderId}")
-    public ResponseEntity<ApiResponse<PaymentEntity>> getPaymentByOrderId(@PathVariable String orderId) {
-        return ResponseEntity.ok(ApiResponse.ok("Payment found", paymentService.getPaymentByOrderId(orderId)));
+    @Operation(summary = "The signed-in user's payments")
+    @GetMapping("/mine")
+    public ApiResponse<List<PaymentEntity>> mine(@RequestHeader(value = USER, required = false) String userId) {
+        return ApiResponse.ok("Payments", paymentService.paymentsOf(userId));
     }
 
-    @Operation(summary = "Update Payment Status", description = "Manually update the payment status (PENDING, SUCCESS, FAILED) of a transaction.")
-    @PutMapping("/{id}/status")
-    public ResponseEntity<ApiResponse<PaymentEntity>> updatePaymentStatus(
-            @PathVariable String id,
-            @RequestParam PaymentStatus status) {
-        return ResponseEntity.ok(ApiResponse.ok("Payment status updated", paymentService.updatePaymentStatus(id, status)));
+    // ------------------------------------------------------------------ admin
+
+    @Operation(summary = "List all payments (admin)")
+    @GetMapping("/admin/all")
+    public ApiResponse<List<PaymentEntity>> getAllPayments() {
+        return ApiResponse.ok("Payments", paymentService.getAllPayments());
     }
 
-    // =========================================================================
-    // Validation error handler — returns 400 with field-level messages
-    // =========================================================================
+    @Operation(summary = "Get a payment by id (admin)")
+    @GetMapping("/admin/{id}")
+    public ApiResponse<PaymentEntity> getPaymentById(@PathVariable String id) {
+        return ApiResponse.ok("Payment found", paymentService.getPaymentById(id));
+    }
+
+    @Operation(summary = "Latest payment for an order (admin)")
+    @GetMapping("/admin/order/{orderId}")
+    public ApiResponse<PaymentEntity> getPaymentByOrderId(@PathVariable String orderId) {
+        return ApiResponse.ok("Payment found", paymentService.getPaymentByOrderId(orderId));
+    }
+
+    @Operation(summary = "Correct a payment's status (admin). Does not move money.")
+    @PutMapping("/admin/{id}/status")
+    public ApiResponse<PaymentEntity> updatePaymentStatus(@PathVariable String id, @RequestParam PaymentStatus status) {
+        return ApiResponse.ok("Payment status updated", paymentService.updatePaymentStatus(id, status));
+    }
+
+    // ----------------------------------------------------------------- errors
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ResponseEntity<ApiResponse<Map<String, String>>> handleValidation(
-            MethodArgumentNotValidException ex) {
+    public ResponseEntity<ApiResponse<Map<String, String>>> handleValidation(MethodArgumentNotValidException ex) {
         Map<String, String> errors = new HashMap<>();
         for (FieldError fe : ex.getBindingResult().getFieldErrors()) {
             errors.put(fe.getField(), fe.getDefaultMessage());
@@ -138,13 +126,12 @@ public class PaymentController {
         return ResponseEntity.badRequest().body(ApiResponse.fail("Validation failed: " + errors));
     }
 
-    // =========================================================================
-    // Razorpay-specific error handler
-    // =========================================================================
     @ExceptionHandler(RazorpayException.class)
     public ResponseEntity<ApiResponse<Map<String, String>>> handleRazorpay(RazorpayException ex) {
         log.error("Razorpay error: {}", ex.getMessage());
-        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                .body(ApiResponse.fail("Razorpay error: " + ex.getMessage()));
+        String message = ex.getMessage() != null && ex.getMessage().contains("Authentication failed")
+                ? "Online payments are unavailable: the Razorpay keys were rejected."
+                : "Razorpay could not start the payment. Please try again.";
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail(message));
     }
 }
